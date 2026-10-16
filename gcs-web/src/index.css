@@ -334,3 +334,7 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid rgba(255, 255, 255, 
 .cx-foot .sp { flex: 1; }
 .cx-log { margin: 10px 0 0; max-height: 180px; overflow: auto; background: #0c0e11; border: 1px solid var(--line); border-radius: 6px; padding: 8px; font-size: 11px; line-height: 1.5; color: var(--muted); white-space: pre-wrap; }
 .banner .btn { margin-left: 8px; }
+.cx-seg { display: inline-flex; border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 6px; overflow: hidden; margin-bottom: 10px; }
+.cx-seg button { border: 0; background: var(--panel-2); padding: 7px 14px; cursor: pointer; font-size: 12.5px; }
+.cx-seg button + button { border-left: 1px solid rgba(255, 255, 255, 0.1); }
+.cx-seg button.on { background: var(--blue); }

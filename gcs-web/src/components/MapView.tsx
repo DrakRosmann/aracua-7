@@ -8,6 +8,7 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { station } from '../lib/store'
 import { circle, rectangle, survey, type LatLon } from '../lib/geo'
 import { wpName } from '../lib/format'
+import { vehicleClass, type VehicleClass } from '../types'
 
 setWorkerUrl(workerUrl)
 
@@ -15,13 +16,28 @@ const EMPTY: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: 
 const MAX_OBSTACLE_POINTS = 60_000
 const MAX_GROUND_POINTS = 40_000
 
+/** Silhueta vista de cima, com a proa para cima (o mapa gira pelo rumo). */
+const SILHOUETTE: Record<VehicleClass, string> = {
+  copter: `<path d="M-11-11L11 11M11-11L-11 11" stroke="#fff" stroke-width="3.5"/>
+    ${[[-11, -11], [11, -11], [-11, 11], [11, 11]].map(([x, y]) => `<circle cx="${x}" cy="${y}" r="6" fill="rgba(20,22,27,.6)" stroke="#fff" stroke-width="2"/>`).join('')}
+    <path class="nose" d="M0-9L6 4H-6Z"/>`,
+  heli: `<circle r="17" fill="none" stroke="#fff" stroke-width="1.5" stroke-dasharray="3 3"/>
+    <path d="M-16 0H16M0-16V16" stroke="#fff" stroke-width="2.5"/>
+    <ellipse cy="-2" rx="5" ry="8" fill="rgba(20,22,27,.6)" stroke="#fff" stroke-width="2"/>
+    <path d="M0 6V18M-4 17H4" stroke="#fff" stroke-width="2.5"/><path class="nose" d="M0-9L4-3H-4Z"/>`,
+  plane: `<path d="M0-17C2-17 2.5-14 2.5-11V-3L17 3V6.5L2.5 3.5V11L7 14.5V17L0 15L-7 17V14.5L-2.5 11V3.5L-17 6.5V3L-2.5-3V-11C-2.5-14-2-17 0-17Z" fill="rgba(20,22,27,.6)" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>
+    <path class="nose" d="M0-16L2-11H-2Z"/>`,
+  vtol: `<path d="M0-17C2-17 2.5-14 2.5-11V-3L17 3V6.5L2.5 3.5V11L7 14.5V17L0 15L-7 17V14.5L-2.5 11V3.5L-17 6.5V3L-2.5-3V-11C-2.5-14-2-17 0-17Z" fill="rgba(20,22,27,.6)" stroke="#fff" stroke-width="2" stroke-linejoin="round"/>
+    ${[[-10, -8], [10, -8], [-10, 11], [10, 11]].map(([x, y]) => `<circle cx="${x}" cy="${y}" r="4.5" fill="none" stroke="#fff" stroke-width="1.5"/>`).join('')}
+    <path class="nose" d="M0-16L2-11H-2Z"/>`,
+  rover: `<rect x="-9" y="-14" width="18" height="28" rx="4" fill="rgba(20,22,27,.6)" stroke="#fff" stroke-width="2"/>
+    <path class="nose" d="M0-11L5-4H-5Z"/>`,
+}
+
 function vehicleElement() {
   const el = document.createElement('div')
   el.className = 'veh-marker'
-  el.innerHTML = `<div class="ring"></div><svg class="quad" viewBox="-20 -20 40 40" aria-hidden="true">
-    <path d="M-11-11L11 11M11-11L-11 11" stroke="#fff" stroke-width="3.5"/>
-    ${[[-11, -11], [11, -11], [-11, 11], [11, 11]].map(([x, y]) => `<circle cx="${x}" cy="${y}" r="6" fill="rgba(20,22,27,.6)" stroke="#fff" stroke-width="2"/>`).join('')}
-    <path class="nose" d="M0-9L6 4H-6Z"/></svg><span class="lbl">Aracuã-7</span>`
+  el.innerHTML = `<div class="ring"></div><svg class="quad" viewBox="-20 -20 40 40" aria-hidden="true">${SILHOUETTE.copter}</svg><span class="lbl">Aracuã-7</span>`
   return el
 }
 
@@ -103,7 +119,13 @@ export function MapView() {
       vehicle.setLngLat([t.lon, t.lat])
       if (!vehicle.getElement().isConnected) vehicle.addTo(map)
       const el = vehicle.getElement()
-      ;(el.querySelector('.quad') as SVGElement).style.transform = `rotate(${t.heading}deg)`
+      const svg = el.querySelector('.quad') as SVGElement
+      const cls = vehicleClass(t)
+      if (svg.dataset.cls !== cls) {
+        svg.dataset.cls = cls
+        svg.innerHTML = SILHOUETTE[cls]
+      }
+      svg.style.transform = `rotate(${t.heading}deg)`
       el.classList.toggle('armed', t.armed)
       el.classList.toggle('lost', !t.connected)
       el.classList.toggle('avoid', station.nearest < 6 && t.armed)

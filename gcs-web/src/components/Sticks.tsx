@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { station, useChannels } from '../lib/store'
-import { MANUAL_MODES } from '../types'
+import { MANUAL_MODES, vehicleClass } from '../types'
 
 type Axis = { x: number; y: number }
 const KEYS = ['w', 'a', 's', 'd', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']
@@ -44,7 +44,7 @@ export function Sticks() {
   const keys = useRef<Record<string, boolean>>({})
   const [enabled, setEnabled] = useState(false)
   const t = station.telem
-  const manual = !!t?.armed && MANUAL_MODES.has(t.mode)
+  const manual = !!t?.armed && MANUAL_MODES[vehicleClass(t)].has(t.mode)
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -66,7 +66,7 @@ export function Sticks() {
     if (!enabled) return
     const id = setInterval(() => {
       const t = station.telem
-      if (!t?.armed || !MANUAL_MODES.has(t.mode)) return
+      if (!t?.armed || !MANUAL_MODES[vehicleClass(t)].has(t.mode)) return
       const k = keys.current
       const kv = (a: string, b: string) => (k[a] ? 1 : 0) - (k[b] ? 1 : 0)
       const { left: L, right: R } = state.current

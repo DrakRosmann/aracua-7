@@ -48,8 +48,10 @@ fn yes() -> bool {
     true
 }
 
-pub fn set_mode(link: &Link, name: &str) -> Result<(), String> {
-    let n = modes::mode_number(name).ok_or_else(|| format!("modo desconhecido: {name}"))?;
+pub fn set_mode(shared: &Shared, name: &str) -> Result<(), String> {
+    let class = shared.state.lock().unwrap().class;
+    let n = modes::mode_number(class, name).ok_or_else(|| format!("modo {name} não existe para {}", class.as_str()))?;
+    let link = &shared.link;
     // param1 = MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, param2 = modo customizado.
     link.command_long(MavCmd::MAV_CMD_DO_SET_MODE, [1.0, n as f32, 0.0, 0.0, 0.0, 0.0, 0.0]);
     Ok(())
@@ -62,6 +64,21 @@ fn param_id(id: &str) -> Result<mavlink::types::CharArray<16>, String> {
     Ok(id.into())
 }
 
+fn send_param(link: &Link, id: &str, value: f32) -> Result<(), String> {
+    if !value.is_finite() {
+        return Err("valor de parâmetro inválido".into());
+    }
+    let (ts, tc) = link.target();
+    link.send(&MavMessage::PARAM_SET(PARAM_SET_DATA {
+        param_value: value,
+        target_system: ts,
+        target_component: tc,
+        param_id: param_id(id)?,
+        param_type: MavParamType::MAV_PARAM_TYPE_REAL32,
+    }));
+    Ok(())
+}
+
 /// Executa um comando. Erros voltam para a interface como `{type:"error"}`.
 pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
     let link = &shared.link;
@@ -70,12 +87,26 @@ pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
             let magic = if force { 21196.0 } else { 0.0 };
             link.command_long(MavCmd::MAV_CMD_COMPONENT_ARM_DISARM, [arm as u8 as f32, magic, 0.0, 0.0, 0.0, 0.0, 0.0]);
         }
-        Command::Mode { mode } => set_mode(link, &mode)?,
+        Command::Mode { mode } => set_mode(shared, &mode)?,
         Command::Takeoff { alt } => {
             if !(1.0..=500.0).contains(&alt) {
                 return Err("altitude de decolagem fora de 1–500 m".into());
             }
-            set_mode(link, "GUIDED")?;
+            let class = shared.state.lock().unwrap().class;
+            if class == modes::VehicleClass::Rover {
+                return Err("veículo terrestre: não há decolagem".into());
+            }
+            if class.fixed_wing() {
+                // ArduPlane: altitude no TKOFF_ALT e modo TAKEOFF; arma e ele sobe em linha reta.
+                send_param(link, "TKOFF_ALT", alt)?;
+                set_mode(shared, "TAKEOFF")?;
+                if !shared.state.lock().unwrap().t.armed {
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    link.command_long(MavCmd::MAV_CMD_COMPONENT_ARM_DISARM, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+                }
+                return Ok(());
+            }
+            set_mode(shared, "GUIDED")?;
             let armed = shared.state.lock().unwrap().t.armed;
             if !armed {
                 tokio::time::sleep(Duration::from_millis(300)).await;
@@ -122,10 +153,11 @@ pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
                 }
                 drops
             };
-            shared.mission.lock().unwrap().start(link, home, &items, &drops, rtl_at_end);
+            let fixed_wing = shared.state.lock().unwrap().class.fixed_wing();
+            shared.mission.lock().unwrap().start(link, home, &items, &drops, rtl_at_end, fixed_wing);
         }
         Command::MissionStart => {
-            set_mode(link, "AUTO")?;
+            set_mode(shared, "AUTO")?;
             link.command_long(MavCmd::MAV_CMD_MISSION_START, [0.0; 7]);
         }
         Command::Manual { x, y, z, r } => {
@@ -150,19 +182,7 @@ pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
                 param_id: param_id(&id)?,
             }));
         }
-        Command::ParamSet { id, value } => {
-            if !value.is_finite() {
-                return Err("valor de parâmetro inválido".into());
-            }
-            let (ts, tc) = link.target();
-            link.send(&MavMessage::PARAM_SET(PARAM_SET_DATA {
-                param_value: value,
-                target_system: ts,
-                target_component: tc,
-                param_id: param_id(&id)?,
-                param_type: MavParamType::MAV_PARAM_TYPE_REAL32,
-            }));
-        }
+        Command::ParamSet { id, value } => send_param(link, &id, value)?,
         Command::Photo => link.command_long(MavCmd::MAV_CMD_DO_DIGICAM_CONTROL, [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
         Command::Gimbal { pitch, yaw } => {
             // param7 = MAV_MOUNT_MODE_MAVLINK_TARGETING

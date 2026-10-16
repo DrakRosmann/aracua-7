@@ -51,6 +51,8 @@ pub struct Telemetry {
     pub system_id: u8,
     pub autopilot: String,
     pub vehicle_type: String,
+    /// copter, heli, plane, vtol ou rover: decide a tabela de modos e os comandos.
+    pub vehicle_class: String,
     pub armed: bool,
     pub mode: String,
     pub custom_mode: u32,
@@ -98,6 +100,7 @@ pub enum Event {
 #[derive(Default)]
 pub struct State {
     pub t: Telemetry,
+    pub class: modes::VehicleClass,
     last_heartbeat_ms: u64,
     counts: BTreeMap<&'static str, u64>,
     counts_prev: BTreeMap<&'static str, u64>,
@@ -125,8 +128,10 @@ impl State {
                 self.last_heartbeat_ms = now_ms();
                 self.t.system_id = sys;
                 self.t.armed = h.base_mode.contains(MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED);
+                self.class = modes::VehicleClass::from_mav_type(h.mavtype);
+                self.t.vehicle_class = self.class.as_str().into();
                 self.t.custom_mode = h.custom_mode;
-                self.t.mode = modes::mode_name(h.custom_mode);
+                self.t.mode = modes::mode_name(self.class, h.custom_mode);
                 self.t.system_status = format!("{:?}", h.system_status).replace("MAV_STATE_", "");
                 self.t.autopilot = format!("{:?}", h.autopilot).replace("MAV_AUTOPILOT_", "");
                 self.t.vehicle_type = format!("{:?}", h.mavtype).replace("MAV_TYPE_", "");

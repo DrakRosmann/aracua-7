@@ -11,7 +11,7 @@ sem alteração a partir do computador de bordo (`ros2_ws/`, nó `map_link`).
 | `type`            | Quando                     | Conteúdo |
 |-------------------|----------------------------|----------|
 | `hello`           | ao conectar                | `bridge`, `version`, `mavlink` (endereço) |
-| `telemetry`       | 10 Hz                      | estado completo do veículo (ver `gcs-web/src/types.ts` → `Telemetry`) |
+| `telemetry`       | 10 Hz                      | estado completo do veículo (ver `gcs-web/src/types.ts` → `Telemetry`); `vehicle_class` (`copter`, `heli`, `plane`, `vtol` ou `rover`) diz qual tabela de modos vale |
 | `statustext`      | a cada STATUSTEXT          | `severity` (0–7), `text` |
 | `ack`             | a cada COMMAND_ACK         | `command` (ex.: `MAV_CMD_NAV_TAKEOFF`), `result` (ex.: `MAV_RESULT_ACCEPTED`) |
 | `param`           | a cada PARAM_VALUE         | `id`, `value`, `index`, `count` |
@@ -27,8 +27,8 @@ sem alteração a partir do computador de bordo (`ros2_ws/`, nó `map_link`).
 | `cmd`             | Campos | MAVLink gerado |
 |-------------------|--------|----------------|
 | `arm`             | `arm: bool`, `force?: bool` | `MAV_CMD_COMPONENT_ARM_DISARM` |
-| `mode`            | `mode: "STABILIZE"\|"ALT_HOLD"\|"LOITER"\|"POSHOLD"\|"GUIDED"\|"AUTO"\|"RTL"\|"LAND"\|"BRAKE"` | `MAV_CMD_DO_SET_MODE` (modo customizado ArduCopter) |
-| `takeoff`         | `alt` (m, relativa) | modo GUIDED → arma se preciso → `MAV_CMD_NAV_TAKEOFF` |
+| `mode`            | `mode`: nome do modo no firmware do veículo (ex.: `LOITER`, `FBWA`, `QHOVER`) | `MAV_CMD_DO_SET_MODE` com o número do modo na tabela da classe |
+| `takeoff`         | `alt` (m, relativa) | multirrotor/helicóptero: GUIDED → arma → `MAV_CMD_NAV_TAKEOFF`; avião/VTOL: `TKOFF_ALT` = alt → modo TAKEOFF → arma |
 | `mission_upload`  | `items: [{lat, lon, alt}]`, `rtl_at_end?: bool` | protocolo de missão completo (COUNT → REQUEST_INT → ITEM_INT → ACK) |
 | `mission_start`   | — | modo AUTO + `MAV_CMD_MISSION_START` |
 | `manual`          | `x, y, z, r` em −1…1 (z em 0…1) | `MANUAL_CONTROL` |

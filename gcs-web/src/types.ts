@@ -8,6 +8,8 @@ export interface Telemetry {
   system_id: number
   autopilot: string
   vehicle_type: string
+  /** Classe usada para escolher modos e comandos (ver VehicleClass). */
+  vehicle_class: VehicleClass
   armed: boolean
   mode: string
   custom_mode: number
@@ -126,7 +128,7 @@ export interface MissionItem {
 
 export type ClientCommand =
   | { cmd: 'arm'; arm: boolean; force?: boolean }
-  | { cmd: 'mode'; mode: FlightMode }
+  | { cmd: 'mode'; mode: string }
   | { cmd: 'takeoff'; alt: number }
   | { cmd: 'mission_upload'; items: MissionItem[]; rtl_at_end?: boolean }
   | { cmd: 'mission_start' }
@@ -146,10 +148,44 @@ export type ClientCommand =
   | { cmd: 'payload_reset_counter' }
   | { cmd: 'payload_get' }
 
-export const FLIGHT_MODES = ['STABILIZE', 'ALT_HOLD', 'LOITER', 'POSHOLD', 'GUIDED', 'AUTO', 'RTL', 'LAND', 'BRAKE'] as const
-export type FlightMode = (typeof FLIGHT_MODES)[number]
+// ---------- Tipos de veículo e modos de voo ----------
 
-export const MODE_LABEL: Record<string, string> = {
+/** copter = multirrotor e heli = helicóptero (ArduCopter); plane e vtol (ArduPlane); rover (ArduRover). */
+export type VehicleClass = 'copter' | 'heli' | 'plane' | 'vtol' | 'rover'
+
+export const CLASS_LABEL: Record<VehicleClass, string> = {
+  copter: 'Multirrotor',
+  heli: 'Helicóptero',
+  plane: 'Avião',
+  vtol: 'VTOL',
+  rover: 'Terrestre',
+}
+
+const COPTER_MENU = ['STABILIZE', 'ALT_HOLD', 'LOITER', 'POSHOLD', 'GUIDED', 'AUTO', 'RTL', 'LAND', 'BRAKE']
+const PLANE_MENU = ['MANUAL', 'STABILIZE', 'FBWA', 'FBWB', 'CRUISE', 'TAKEOFF', 'LOITER', 'CIRCLE', 'GUIDED', 'AUTO', 'RTL']
+
+/** Modos oferecidos no menu, por tipo de veículo (os nomes são os do firmware). */
+export const MODES_BY_CLASS: Record<VehicleClass, string[]> = {
+  copter: COPTER_MENU,
+  heli: COPTER_MENU,
+  plane: PLANE_MENU,
+  vtol: [...PLANE_MENU, 'QSTABILIZE', 'QHOVER', 'QLOITER', 'QLAND', 'QRTL'],
+  rover: ['MANUAL', 'ACRO', 'STEERING', 'HOLD', 'LOITER', 'GUIDED', 'AUTO', 'RTL'],
+}
+
+const COPTER_MANUAL = ['STABILIZE', 'ALT_HOLD', 'LOITER', 'POSHOLD']
+const PLANE_MANUAL = ['MANUAL', 'STABILIZE', 'FBWA', 'FBWB', 'CRUISE', 'ACRO', 'TRAINING']
+
+/** Modos em que os sticks virtuais comandam o veículo. */
+export const MANUAL_MODES: Record<VehicleClass, Set<string>> = {
+  copter: new Set(COPTER_MANUAL),
+  heli: new Set(COPTER_MANUAL),
+  plane: new Set(PLANE_MANUAL),
+  vtol: new Set([...PLANE_MANUAL, 'QSTABILIZE', 'QHOVER', 'QLOITER']),
+  rover: new Set(['MANUAL', 'ACRO', 'STEERING']),
+}
+
+const MODE_LABEL: Record<string, string> = {
   STABILIZE: 'Estabilizado',
   ALT_HOLD: 'Altitude',
   LOITER: 'Posição',
@@ -160,10 +196,33 @@ export const MODE_LABEL: Record<string, string> = {
   LAND: 'Pouso',
   BRAKE: 'Freio',
   SMART_RTL: 'Retorno inteligente',
+  MANUAL: 'Manual',
+  ACRO: 'Acro',
+  TRAINING: 'Treino',
+  FBWA: 'Assistido (FBWA)',
+  FBWB: 'Altitude (FBWB)',
+  CRUISE: 'Cruzeiro',
+  CIRCLE: 'Círculo',
+  TAKEOFF: 'Decolagem',
+  QSTABILIZE: 'Q Estabilizado',
+  QHOVER: 'Q Pairar',
+  QLOITER: 'Q Posição',
+  QLAND: 'Q Pouso',
+  QRTL: 'Q Retornar',
+  HOLD: 'Parado',
+  STEERING: 'Direção',
 }
 
-/** Modos em que os sticks virtuais comandam o veículo. */
-export const MANUAL_MODES = new Set(['STABILIZE', 'ALT_HOLD', 'LOITER', 'POSHOLD'])
+/** Nome do modo para mostrar. LOITER no avião é circular, não pairar. */
+export function modeLabel(mode: string, cls: VehicleClass): string {
+  if (mode === 'LOITER' && (cls === 'plane' || cls === 'vtol')) return 'Circular'
+  if (mode === 'LOITER' && cls === 'rover') return 'Segurar posição'
+  return MODE_LABEL[mode] ?? mode
+}
+
+export function vehicleClass(t: Telemetry | null | undefined): VehicleClass {
+  return t?.vehicle_class ?? 'copter'
+}
 
 export type LogLevel = 'info' | 'ok' | 'warn' | 'error' | 'cmd'
 export interface LogEntry {

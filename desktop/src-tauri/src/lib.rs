@@ -15,10 +15,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{Manager, RunEvent, State};
 
-/// Endereço do WebSocket da ponte; só a própria máquina acessa.
-const BRIDGE_WS: &str = "127.0.0.1:8765";
-/// Porta onde o simulador entrega MAVLink para a ponte.
-const SIM_MAVLINK_PORT: u16 = 14550;
+/// Portas padrão; mudam com ARACUA_WS_PORT, ARACUA_SIM_PORT e ARACUA_MAP_PORT
+/// (para rodar duas cópias do app ao mesmo tempo, por exemplo).
+const DEFAULT_WS_PORT: u16 = 8765;
+const DEFAULT_SIM_PORT: u16 = 14550;
+const DEFAULT_MAP_PORT: u16 = 14600;
+
+fn port(var: &str, default: u16) -> u16 {
+    std::env::var(var).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// WebSocket da ponte; só a própria máquina acessa.
+fn bridge_ws() -> String {
+    format!("127.0.0.1:{}", port("ARACUA_WS_PORT", DEFAULT_WS_PORT))
+}
 /// Linhas de log guardadas para mostrar na tela de conexão.
 const LOG_LINES: usize = 400;
 
@@ -32,6 +42,9 @@ pub enum LinkConfig {
         lat: Option<f64>,
         #[serde(default)]
         lon: Option<f64>,
+        /// copter, heli, plane ou vtol (padrão: copter).
+        #[serde(default)]
+        vehicle: Option<String>,
     },
     /// Rádio de telemetria ou cabo USB.
     Serial { port: String, baud: u32 },
@@ -53,7 +66,7 @@ impl LinkConfig {
             }
         };
         Ok(match self {
-            LinkConfig::Simulator { .. } => format!("udpin:127.0.0.1:{SIM_MAVLINK_PORT}"),
+            LinkConfig::Simulator { .. } => format!("udpin:127.0.0.1:{}", port("ARACUA_SIM_PORT", DEFAULT_SIM_PORT)),
             LinkConfig::Serial { port, baud } => {
                 if !(1200..=3_000_000).contains(baud) {
                     return Err(format!("velocidade inválida: {baud}"));
@@ -64,6 +77,14 @@ impl LinkConfig {
             LinkConfig::Tcp { address } => format!("tcpout:{}", host_port(&clean(address, "endereço TCP")?)?),
         })
     }
+}
+
+/// Tipos de veículo que o simulador conhece.
+fn sim_vehicle(v: &str) -> Result<&'static str, String> {
+    ["copter", "heli", "plane", "vtol"]
+        .into_iter()
+        .find(|k| *k == v)
+        .ok_or_else(|| format!("tipo de veículo do simulador inválido: {v:?}"))
 }
 
 /// Aceita "host:porta" ou só "porta" (escuta em todas as interfaces).
@@ -150,7 +171,7 @@ impl Supervisor {
             running: guard.is_some(),
             config: guard.as_ref().map(|r| r.config.clone()),
             exit_code: *self.exit_code.lock().unwrap(),
-            bridge_url: format!("ws://{BRIDGE_WS}"),
+            bridge_url: format!("ws://{}", bridge_ws()),
             log: self.log.lock().unwrap().iter().cloned().collect(),
         }
     }
@@ -248,7 +269,9 @@ fn start_link(app: tauri::AppHandle, sup: State<'_, Supervisor>, config: LinkCon
         "--mavlink".into(),
         url.clone(),
         "--ws".into(),
-        BRIDGE_WS.into(),
+        bridge_ws(),
+        "--map-udp".into(),
+        format!("0.0.0.0:{}", port("ARACUA_MAP_PORT", DEFAULT_MAP_PORT)),
         "--payload-file".into(),
         payload.to_string_lossy().into_owned(),
     ];
@@ -257,8 +280,16 @@ fn start_link(app: tauri::AppHandle, sup: State<'_, Supervisor>, config: LinkCon
     capture(&sup.log, "", bridge.stderr.take().unwrap());
     let mut stdin = vec![bridge.stdin.take().unwrap()];
 
-    let sim = if let LinkConfig::Simulator { lat, lon } = &config {
-        let mut args = vec!["--mavlink".into(), format!("udpout:127.0.0.1:{SIM_MAVLINK_PORT}")];
+    let sim = if let LinkConfig::Simulator { lat, lon, vehicle } = &config {
+        let mut args = vec![
+            "--mavlink".into(),
+            format!("udpout:127.0.0.1:{}", port("ARACUA_SIM_PORT", DEFAULT_SIM_PORT)),
+            "--map".into(),
+            format!("127.0.0.1:{}", port("ARACUA_MAP_PORT", DEFAULT_MAP_PORT)),
+        ];
+        if let Some(v) = vehicle {
+            args.extend(["--vehicle".into(), sim_vehicle(v)?.into()]);
+        }
         if let (Some(lat), Some(lon)) = (lat, lon) {
             args.extend(["--lat".into(), lat.to_string(), "--lon".into(), lon.to_string()]);
         }
@@ -320,7 +351,7 @@ mod tests {
 
     #[test]
     fn urls_da_ponte() {
-        let sim = LinkConfig::Simulator { lat: None, lon: None };
+        let sim = LinkConfig::Simulator { lat: None, lon: None, vehicle: None };
         assert_eq!(sim.mavlink_url().unwrap(), "udpin:127.0.0.1:14550");
         let s = LinkConfig::Serial { port: "/dev/ttyUSB0".into(), baud: 57600 };
         assert_eq!(s.mavlink_url().unwrap(), "serial:/dev/ttyUSB0:57600");
@@ -346,7 +377,16 @@ mod tests {
         let c: LinkConfig = serde_json::from_str(r#"{"kind":"serial","port":"/dev/ttyACM0","baud":921600}"#).unwrap();
         assert_eq!(c, LinkConfig::Serial { port: "/dev/ttyACM0".into(), baud: 921600 });
         let c: LinkConfig = serde_json::from_str(r#"{"kind":"simulator"}"#).unwrap();
-        assert_eq!(c, LinkConfig::Simulator { lat: None, lon: None });
+        assert_eq!(c, LinkConfig::Simulator { lat: None, lon: None, vehicle: None });
+        let c: LinkConfig = serde_json::from_str(r#"{"kind":"simulator","vehicle":"plane"}"#).unwrap();
+        assert_eq!(c, LinkConfig::Simulator { lat: None, lon: None, vehicle: Some("plane".into()) });
+    }
+
+    #[test]
+    fn tipos_do_simulador() {
+        assert_eq!(sim_vehicle("vtol"), Ok("vtol"));
+        assert!(sim_vehicle("rover").is_err());
+        assert!(sim_vehicle("plane --mavlink x").is_err());
     }
 
     #[test]

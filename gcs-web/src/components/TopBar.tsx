@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { station, useChannels, type View } from '../lib/store'
 import { clock } from '../lib/format'
-import { FLIGHT_MODES, MODE_LABEL } from '../types'
+import { CLASS_LABEL, MODES_BY_CLASS, modeLabel, vehicleClass } from '../types'
 import { BatteryIcon, Icon } from './Icons'
 import { DeliveryChip } from './Delivery'
 import { describeLink, isDesktop } from '../lib/desktop'
@@ -40,6 +40,7 @@ export function TopBar() {
   const connected = station.conn === 'open' && !!t?.connected
   const bars = !connected ? 0 : t!.radio ? Math.round((t!.radio.rssi / 254) * 5) : t!.msgs_per_sec > 40 ? 5 : t!.msgs_per_sec > 20 ? 4 : t!.msgs_per_sec > 8 ? 3 : 1
   const toggle = (m: Menu) => setMenu(menu === m ? null : m)
+  const cls = vehicleClass(t)
 
   return (
     <header className="top" ref={ref}>
@@ -60,7 +61,7 @@ export function TopBar() {
       <div className="grp">
         <DeliveryChip />
         <button className="pill" onClick={() => toggle('mode')} disabled={!connected}>
-          {t?.connected ? MODE_LABEL[t.mode] ?? t.mode : station.conn === 'open' ? 'Sem veículo' : 'Desconectado'}
+          {t?.connected ? modeLabel(t.mode, cls) : station.conn === 'open' ? 'Sem veículo' : 'Desconectado'}
           <Icon.chevron size={12} />
         </button>
         <button className={`pill ${t?.armed ? 'armed' : ''}`} onClick={() => toggle('arm')} disabled={!connected}>
@@ -87,9 +88,9 @@ export function TopBar() {
       {menu === 'veh' && <VehicleMenu close={close} />}
       {menu === 'mode' && (
         <div className="menu" style={{ top: 40, right: 250 }}>
-          {FLIGHT_MODES.map((m) => (
+          {MODES_BY_CLASS[cls].map((m) => (
             <button key={m} className={t?.mode === m ? 'on' : ''} onClick={() => { station.send({ cmd: 'mode', mode: m }); close() }}>
-              {MODE_LABEL[m]} <small>{m}</small>
+              {modeLabel(m, cls)} <small>{m}</small>
             </button>
           ))}
         </div>
@@ -127,7 +128,7 @@ function VehicleMenu({ close }: { close: () => void }) {
       <h4><span className={`dot ${t?.connected ? 'on' : ''}`} />Aracuã-7 · {t?.connected ? 'conectado' : station.conn === 'open' ? 'ponte ok, sem veículo' : 'desconectado'}</h4>
       <div className="kv"><span>Ponte</span><b>{station.hello ? `${station.hello.bridge} ${station.hello.version}` : '—'}</b></div>
       <div className="kv"><span>MAVLink</span><b>{station.hello?.mavlink ?? '—'}</b></div>
-      <div className="kv"><span>Sistema</span><b>{t?.connected ? `SYSID ${t.system_id} · ${t.vehicle_type}` : '—'}</b></div>
+      <div className="kv"><span>Sistema</span><b>{t?.connected ? `SYSID ${t.system_id} · ${CLASS_LABEL[vehicleClass(t)]}` : '—'}</b></div>
       <div className="kv"><span>Piloto automático</span><b>{t?.autopilot || '—'}</b></div>
       <div className="kv"><span>Estado</span><b>{t?.connected ? t.system_status : '—'}</b></div>
       {isDesktop ? (

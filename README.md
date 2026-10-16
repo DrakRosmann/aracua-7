@@ -22,7 +22,8 @@ Baixe o instalador da [última versão](https://github.com/DrakRosmann/aracua-7/
 O app junta a interface, a ponte MAVLink e o simulador. Ao abrir, a tela **Conectar** pergunta
 como chegar ao drone:
 
-* **Simulador** — drone virtual com mapa LiDAR sintético, para treinar e testar sem hardware;
+* **Simulador** — veículo virtual com mapa LiDAR sintético, para treinar e testar sem hardware:
+  multirrotor, helicóptero, avião ou VTOL;
 * **Rádio de telemetria** — escolha a porta serial (rádio SiK a 57600 ou USB da controladora);
 * **Rede (UDP)** — rádio IP, MAVLink router ou SITL enviando para a máquina;
 * **TCP / SITL** — por exemplo `127.0.0.1:5760`.
@@ -92,6 +93,30 @@ Na interface: **Decolar** → **Planejar** → **Varredura LiDAR** → **Gerar v
 → **Enviar ao veículo** → **Iniciar missão**.
 
 O veículo simulado serve para testar a interface. Para validar voo de verdade, use o SITL.
+
+`fake-vehicle --vehicle copter|heli|plane|vtol` escolhe o tipo. O multirrotor e o helicóptero
+pairam (modos do ArduCopter). O avião decola correndo no modo TAKEOFF, precisa de velocidade para
+voar, faz curvas inclinado e circula em LOITER e RTL (modos do ArduPlane). O VTOL decola na vertical,
+voa como avião e paira nos modos Q (QHOVER, QLOITER, QLAND, QRTL).
+
+## Tipos de veículo
+
+A ponte lê o tipo no HEARTBEAT (`MAV_TYPE`) e usa a tabela de modos do firmware certo: o mesmo número
+de modo é LOITER no ArduCopter e FBWA no ArduPlane. A interface adapta o menu de modos, os botões
+(no avião, "Pausar" vira "Circular" e não há "Pousar aqui" nem "Freio"), o comando Decolar (modo
+TAKEOFF com `TKOFF_ALT` no avião) e o desenho no mapa.
+
+| Classe | `MAV_TYPE` | Firmware |
+|---|---|---|
+| Multirrotor | QUADROTOR, HEXAROTOR, OCTOROTOR… | ArduCopter |
+| Helicóptero | HELICOPTER | ArduCopter (TradHeli) |
+| Avião | FIXED_WING | ArduPlane |
+| VTOL | VTOL_* | ArduPlane (QuadPlane) |
+| Terrestre | GROUND_ROVER, SURFACE_BOAT | ArduRover (modos e mapa; sem simulador ainda) |
+
+Ainda são do multirrotor: o pouso do avião em missão (`DO_LAND_START`/`NAV_LAND`), os parâmetros
+mostrados em **Configurar** e a entrega em voo do avião (hoje ela paira sobre o ponto, como no
+multirrotor).
 
 ## Testar com o SITL do ArduPilot + ROS 2
 

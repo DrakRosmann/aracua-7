@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactNode } from 'react'
 import { station, useChannels, PARAM_IDS } from '../lib/store'
 import { clamp } from '../lib/format'
 import { DeliverySetup } from '../components/Delivery'
+import { CLASS_LABEL, vehicleClass } from '../types'
 
 type Kind = { t: 'number'; unit?: string; scale?: number; min: number; max: number; step?: number } | { t: 'bool' } | { t: 'select'; options: [number, string][] }
 
@@ -70,7 +71,7 @@ function Summary() {
       <p className="desc">{t?.connected ? 'Estado atual lido do piloto automático.' : 'Nenhum veículo conectado. Os dados aparecem quando a ponte receber HEARTBEAT.'}</p>
       <div className="sumgrid">
         <div className="scard"><h4>Veículo {ok(t?.connected)}</h4>
-          <div className="kv"><span>Tipo</span><b>{t?.vehicle_type || '—'}</b></div>
+          <div className="kv"><span>Tipo</span><b>{t?.connected ? `${CLASS_LABEL[vehicleClass(t)]} · ${t.vehicle_type}` : '—'}</b></div>
           <div className="kv"><span>Piloto automático</span><b>{t?.autopilot || '—'}</b></div>
           <div className="kv"><span>SYSID</span><b>{t?.system_id ?? '—'}</b></div>
           <div className="kv"><span>Estado</span><b>{t?.system_status || '—'}</b></div></div>

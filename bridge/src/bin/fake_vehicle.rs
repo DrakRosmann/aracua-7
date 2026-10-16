@@ -1,14 +1,19 @@
 //! Veículo simulado para testar a ponte e a interface sem SITL nem hardware.
 //!
-//! Fala MAVLink como um ArduCopter simplificado (modos, armar, decolar,
+//! Fala MAVLink como um ArduPilot simplificado (modos, armar, decolar,
 //! missão, parâmetros, controle manual) e envia quadros de mapa LiDAR
 //! sintéticos no mesmo formato do nó `map_link` do ROS 2.
+//!
+//! `--vehicle` escolhe o tipo: multirrotor e helicóptero pairam (ArduCopter);
+//! avião voa com velocidade mínima, faz curvas inclinado e circula para
+//! "parar" (ArduPlane); VTOL paira nos modos Q e voa como avião nos demais.
 //!
 //!   cargo run --bin fake-vehicle
 //!
 //! Não substitui o SITL do ArduPilot para validar voo: a física é cinemática.
 #![allow(deprecated)]
 
+use aracua_bridge::modes::VehicleClass;
 use aracua_bridge::{apm::*, char_array_to_string, mapframe, modes};
 use clap::Parser;
 use mavlink::{MavConnection, MavHeader};
@@ -32,12 +37,27 @@ struct Args {
     lat: f64,
     #[arg(long, default_value_t = -46.63331)]
     lon: f64,
+    /// Tipo de veículo: copter (multirrotor), heli, plane (avião) ou vtol
+    #[arg(long, default_value = "copter", value_parser = parse_class)]
+    vehicle: VehicleClass,
     /// Sai quando a entrada padrão fechar (usado pelo app desktop)
     #[arg(long)]
     exit_with_parent: bool,
 }
 
+fn parse_class(s: &str) -> Result<VehicleClass, String> {
+    match VehicleClass::parse(s) {
+        Some(VehicleClass::Rover) | None => Err(format!("tipo inválido: {s} (use copter, heli, plane ou vtol)")),
+        Some(c) => Ok(c),
+    }
+}
+
 const HOME_MSL: f32 = 760.0;
+const G: f64 = 9.81;
+/// Inclinação máxima nas curvas do avião.
+const MAX_BANK_DEG: f64 = 40.0;
+/// Velocidade abaixo da qual o avião perde sustentação.
+const STALL_MS: f64 = 11.0;
 const LIDAR_RANGE: f64 = 90.0;
 
 #[derive(Clone, Copy)]
@@ -137,6 +157,11 @@ fn ray(o: [f64; 3], d: [f64; 3], max: f64, boxes: &[&Bx]) -> Option<(f64, bool)>
 }
 
 struct Vehicle {
+    class: VehicleClass,
+    /// Velocidade em relação ao ar (asa fixa).
+    airspeed: f64,
+    /// Centro do círculo em LOITER/GUIDED (asa fixa).
+    orbit: Option<(f64, f64)>,
     e: f64,
     n: f64,
     alt: f64,
@@ -181,6 +206,67 @@ fn switch_bit(ch: usize) -> Option<usize> {
 }
 
 impl Vehicle {
+    fn mode_name(&self) -> String {
+        modes::mode_name(self.class, self.mode)
+    }
+    fn is(&self, name: &str) -> bool {
+        self.mode_name() == name
+    }
+    /// Muda o modo pelo nome (do firmware deste veículo); ignora nomes que ele não tem.
+    fn go(&mut self, name: &str) {
+        if let Some(n) = modes::mode_number(self.class, name) {
+            self.mode = n;
+            self.enter(name);
+        }
+    }
+    /// Efeitos de entrar num modo: alvo de altitude, círculo novo, missão do começo.
+    fn enter(&mut self, name: &str) {
+        self.orbit = None;
+        match name {
+            "AUTO" => self.cur = 1,
+            "GUIDED" => {
+                self.guided_target = None;
+                self.target_alt = self.alt;
+            }
+            "LOITER" | "CIRCLE" | "CRUISE" | "FBWB" => self.target_alt = self.alt,
+            "TAKEOFF" => self.target_alt = self.params.get("TKOFF_ALT").copied().unwrap_or(50.0) as f64,
+            _ => {}
+        }
+    }
+    /// Modos de pairar com o nome do multirrotor; no VTOL viram os modos Q.
+    fn go_hover(&mut self, name: &str) {
+        let q = match (self.class, name) {
+            (VehicleClass::Vtol, "LAND") => "QLAND",
+            (VehicleClass::Vtol, "RTL") => "QRTL",
+            (VehicleClass::Vtol, "LOITER") => "QLOITER",
+            _ => name,
+        };
+        self.go(q);
+    }
+    /// Este instante usa a física de pairar (multirrotor, helicóptero, VTOL em modo Q
+    /// ou na decolagem vertical)?
+    fn hovering(&self) -> bool {
+        match self.class {
+            VehicleClass::Plane => false,
+            VehicleClass::Vtol => {
+                let m = self.mode_name();
+                m.starts_with('Q') || (m == "TAKEOFF" && self.alt < self.target_alt - 0.5)
+            }
+            _ => true,
+        }
+    }
+    /// Nome equivalente do modo para a física de pairar (VTOL: QLOITER → LOITER…).
+    fn hover_mode(&self) -> String {
+        let m = self.mode_name();
+        match m.as_str() {
+            "QHOVER" | "QSTABILIZE" | "QACRO" => "ALT_HOLD".into(),
+            "QLOITER" => "LOITER".into(),
+            "QLAND" => "LAND".into(),
+            "QRTL" => "RTL".into(),
+            "TAKEOFF" => "GUIDED".into(),
+            _ => m,
+        }
+    }
     fn say(&mut self, sev: MavSeverity, t: impl Into<String>) {
         self.texts.push((sev, t.into()));
     }
@@ -201,21 +287,20 @@ impl Vehicle {
         true
     }
     fn set_mode(&mut self, m: u32) -> bool {
-        if modes::mode_name(m).starts_with("MODE_") {
+        let name = modes::mode_name(self.class, m);
+        if name.starts_with("MODE_") {
             return false;
         }
-        if m == 3 && self.mission.len() < 2 {
+        if self.class == VehicleClass::Plane && name.starts_with('Q') {
+            self.say(MavSeverity::MAV_SEVERITY_WARNING, "Modo Q exige um VTOL (Q_ENABLE)");
+            return false;
+        }
+        if name == "AUTO" && self.mission.len() < 2 {
             self.say(MavSeverity::MAV_SEVERITY_WARNING, "Mission: nenhuma missão carregada");
             return false;
         }
         self.mode = m;
-        if m == 3 {
-            self.cur = 1;
-        }
-        if m == 4 {
-            self.guided_target = None;
-            self.target_alt = self.alt;
-        }
+        self.enter(&name);
         true
     }
 }
@@ -236,24 +321,47 @@ fn main() -> anyhow::Result<()> {
     let to_ll = |e: f64, n: f64| (home_lat + n / 111_320.0, home_lon + e / (111_320.0 * (home_lat * PI / 180.0).cos()));
     let to_en = |lat: f64, lon: f64| ((lon - home_lon) * 111_320.0 * (home_lat * PI / 180.0).cos(), (lat - home_lat) * 111_320.0);
 
-    let params: HashMap<String, f32> = [
-        ("FENCE_ENABLE", 1.0), ("FENCE_RADIUS", 400.0), ("FENCE_ACTION", 1.0), ("RTL_ALT", 3000.0),
-        ("BATT_LOW_MAH", 750.0), ("BATT_FS_LOW_ACT", 2.0), ("FS_GCS_ENABLE", 1.0), ("WPNAV_SPEED", 900.0),
-        ("LOIT_SPEED", 1200.0), ("PILOT_SPEED_UP", 400.0), ("AVOID_ENABLE", 7.0), ("AVOID_DIST_MAX", 9.0),
-        ("PILOT_TKOFF_ALT", 4200.0),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.to_string(), v))
-    .collect();
+    let class = args.vehicle;
+    let common: &[(&str, f32)] = &[
+        ("FENCE_ENABLE", 1.0), ("FENCE_RADIUS", 400.0), ("FENCE_ACTION", 1.0),
+        ("BATT_LOW_MAH", 750.0), ("BATT_FS_LOW_ACT", 2.0), ("FS_GCS_ENABLE", 1.0),
+        ("AVOID_ENABLE", 7.0), ("AVOID_DIST_MAX", 9.0),
+    ];
+    // Parâmetros com os nomes de cada firmware.
+    let specific: &[(&str, f32)] = if class.fixed_wing() {
+        &[
+            ("AIRSPEED_CRUISE", 18.0), ("AIRSPEED_MIN", 12.0), ("TKOFF_ALT", 50.0), ("RTL_ALTITUDE", 80.0),
+            ("WP_RADIUS", 30.0), ("WP_LOITER_RAD", 70.0), ("FENCE_RADIUS", 1500.0),
+            ("Q_ENABLE", if class == VehicleClass::Vtol { 1.0 } else { 0.0 }),
+            ("Q_WP_SPEED", 500.0), ("Q_RTL_ALT", 3000.0),
+        ]
+    } else {
+        &[("RTL_ALT", 3000.0), ("WPNAV_SPEED", 900.0), ("LOIT_SPEED", 1200.0), ("PILOT_SPEED_UP", 400.0), ("PILOT_TKOFF_ALT", 4200.0)]
+    };
+    let params: HashMap<String, f32> = common.iter().chain(specific).map(|(k, v)| (k.to_string(), *v)).collect();
+    let start_mode = match class {
+        VehicleClass::Plane => "MANUAL",
+        VehicleClass::Vtol => "QLOITER",
+        _ => "LOITER",
+    };
 
     let v = Arc::new(Mutex::new(Vehicle {
+        class, airspeed: 0.0, orbit: None,
         e: 0.0, n: 0.0, alt: 0.0, ve: 0.0, vn: 0.0, vz: 0.0, hdg: 48.0, roll: 0.0, pitch: 0.0, yaw_rate: 0.0,
-        armed: false, mode: 5, target_alt: 0.0, guided_target: None, mission: vec![], incoming: None, cur: 0,
+        armed: false, mode: modes::mode_number(class, start_mode).unwrap_or(0), target_alt: 0.0, guided_target: None, mission: vec![], incoming: None, cur: 0,
         manual: (0.0, 0.0, 0.5, 0.0, Instant::now()), used_mah: 0.0, current: 0.0, landed_t: 0.0, params,
         texts: vec![], boot: Instant::now(), servo: [0; 16], relay: [false; 8],
         present: [true, true, true, true, false, false], refill_at: [None; 6], loiter_until: None,
     }));
-    v.lock().unwrap().say(MavSeverity::MAV_SEVERITY_INFO, "ArduCopter simulado (Aracuã-7) pronto");
+    let firmware = match class {
+        VehicleClass::Copter => "ArduCopter simulado (multirrotor)",
+        VehicleClass::Heli => "ArduCopter simulado (helicóptero)",
+        VehicleClass::Plane => "ArduPlane simulado (avião)",
+        VehicleClass::Vtol => "ArduPlane simulado (VTOL / QuadPlane)",
+        VehicleClass::Rover => "ArduRover simulado",
+    };
+    v.lock().unwrap().say(MavSeverity::MAV_SEVERITY_INFO, format!("{firmware} pronto"));
+    eprintln!("{firmware}: MAVLink em {}, mapa em {}", args.mavlink, args.map);
 
     let seq = Arc::new(Mutex::new(0u8));
     let send = {
@@ -290,7 +398,9 @@ fn main() -> anyhow::Result<()> {
                     MavCmd::MAV_CMD_COMPONENT_ARM_DISARM => {
                         let arm = c.param1 > 0.5;
                         let ok = if arm {
-                            let armable = [2, 4, 5, 16, 0].contains(&s.mode);
+                            // O ArduCopter só arma em modos de pilotagem; o ArduPlane arma em quase todos.
+                            let armable = s.class.fixed_wing()
+                                || ["STABILIZE", "ALT_HOLD", "GUIDED", "LOITER", "POSHOLD"].contains(&s.mode_name().as_str());
                             if !armable {
                                 s.say(MavSeverity::MAV_SEVERITY_CRITICAL, "Arm: modo não permite armar");
                             }
@@ -311,7 +421,7 @@ fn main() -> anyhow::Result<()> {
                         ack(&send, c.command, ok);
                     }
                     MavCmd::MAV_CMD_NAV_TAKEOFF => {
-                        let ok = s.armed && s.mode == 4 && s.alt < 1.0;
+                        let ok = s.armed && s.is("GUIDED") && s.alt < 1.0 && !s.class.fixed_wing();
                         if ok {
                             s.target_alt = c.param7 as f64;
                             s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Decolando para {:.0} m", c.param7));
@@ -321,7 +431,7 @@ fn main() -> anyhow::Result<()> {
                     MavCmd::MAV_CMD_MISSION_START => {
                         let ok = s.armed && s.mission.len() > 1;
                         if ok {
-                            s.mode = 3;
+                            s.go("AUTO");
                             s.cur = 1;
                         }
                         ack(&send, c.command, ok);
@@ -425,160 +535,176 @@ fn main() -> anyhow::Result<()> {
             let yaw = if d > 3.0 { (wrap(ex.atan2(ny).to_degrees() - s.hdg) * 1.6).clamp(-70.0, 70.0) } else { 0.0 };
             (a, b, ((ta - s.alt) * 0.8).clamp(-2.5, 3.5), yaw, d)
         };
-        if s.armed {
-            let (mx, my, mz, mr, mt) = s.manual;
-            let fresh = mt.elapsed() < Duration::from_millis(600);
-            match modes::mode_name(s.mode).as_str() {
-                "LOITER" | "POSHOLD" | "ALT_HOLD" | "STABILIZE" => {
-                    if fresh {
-                        let (fw, rt) = (mx * loit_speed, my * loit_speed);
-                        de = fx * fw + fy * rt;
-                        dn = fy * fw - fx * rt;
-                        dz = (mz - 0.5) * 2.0 * climb;
-                        dyaw = mr * 80.0;
+        if s.hovering() {
+            if s.armed {
+                let (mx, my, mz, mr, mt) = s.manual;
+                let fresh = mt.elapsed() < Duration::from_millis(600);
+                match s.hover_mode().as_str() {
+                    "LOITER" | "POSHOLD" | "ALT_HOLD" | "STABILIZE" => {
+                        if fresh {
+                            let (fw, rt) = (mx * loit_speed, my * loit_speed);
+                            de = fx * fw + fy * rt;
+                            dn = fy * fw - fx * rt;
+                            dz = (mz - 0.5) * 2.0 * climb;
+                            dyaw = mr * 80.0;
+                        }
                     }
-                }
-                "GUIDED" => {
-                    let (te, tn) = s.guided_target.unwrap_or((s.e, s.n));
-                    let ta = s.target_alt;
-                    (de, dn, dz, dyaw, _) = goto(&s, te, tn, ta, wp_speed);
-                }
-                "AUTO" => {
-                    let idx = s.cur as usize;
-                    match s.mission.get(idx).cloned() {
-                        Some(it) if it.command == MavCmd::MAV_CMD_NAV_TAKEOFF => {
-                            dz = ((it.z as f64 - s.alt) * 0.9).clamp(0.4, 3.5);
-                            if s.alt >= it.z as f64 - 0.5 {
-                                s.cur += 1;
-                                s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
-                            }
-                        }
-                        Some(it) if it.command == MavCmd::MAV_CMD_NAV_WAYPOINT => {
-                            let (te, tn) = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
-                            let d;
-                            (de, dn, dz, dyaw, d) = goto(&s, te, tn, it.z as f64, wp_speed);
-                            if d < 2.0 && (s.alt - it.z as f64).abs() < 1.5 {
-                                s.cur += 1;
-                                s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
-                            }
-                        }
-                        Some(it) if it.command == MavCmd::MAV_CMD_DO_SET_SERVO => {
-                            s.set_servo(it.param1 as usize, it.param2 as u16);
-                            s.cur += 1;
-                        }
-                        Some(it) if it.command == MavCmd::MAV_CMD_DO_SET_RELAY => {
-                            let i = (it.param1 as usize).min(7);
-                            s.relay[i] = it.param2 > 0.5;
-                            s.cur += 1;
-                        }
-                        Some(it) if it.command == MavCmd::MAV_CMD_NAV_LOITER_TIME => {
-                            let (te, tn) = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
-                            let d;
-                            (de, dn, dz, dyaw, d) = goto(&s, te, tn, it.z as f64, wp_speed);
-                            if d < 2.0 {
-                                let until = *s.loiter_until.get_or_insert(Instant::now() + Duration::from_secs_f32(it.param1.max(0.0)));
-                                if Instant::now() >= until {
-                                    s.loiter_until = None;
+                    "GUIDED" => {
+                        let (te, tn) = s.guided_target.unwrap_or((s.e, s.n));
+                        let ta = s.target_alt;
+                        (de, dn, dz, dyaw, _) = goto(&s, te, tn, ta, wp_speed);
+                    }
+                    "AUTO" => {
+                        let idx = s.cur as usize;
+                        match s.mission.get(idx).cloned() {
+                            Some(it) if it.command == MavCmd::MAV_CMD_NAV_TAKEOFF => {
+                                dz = ((it.z as f64 - s.alt) * 0.9).clamp(0.4, 3.5);
+                                if s.alt >= it.z as f64 - 0.5 {
                                     s.cur += 1;
                                     s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
                                 }
                             }
-                        }
-                        Some(it) if it.command == MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH => {
-                            s.mode = 6;
-                        }
-                        _ => {
-                            s.mode = 5;
-                            s.say(MavSeverity::MAV_SEVERITY_INFO, "Missão concluída, mantendo posição");
+                            Some(it) if it.command == MavCmd::MAV_CMD_NAV_WAYPOINT => {
+                                let (te, tn) = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
+                                let d;
+                                (de, dn, dz, dyaw, d) = goto(&s, te, tn, it.z as f64, wp_speed);
+                                if d < 2.0 && (s.alt - it.z as f64).abs() < 1.5 {
+                                    s.cur += 1;
+                                    s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
+                                }
+                            }
+                            Some(it) if it.command == MavCmd::MAV_CMD_DO_SET_SERVO => {
+                                s.set_servo(it.param1 as usize, it.param2 as u16);
+                                s.cur += 1;
+                            }
+                            Some(it) if it.command == MavCmd::MAV_CMD_DO_SET_RELAY => {
+                                let i = (it.param1 as usize).min(7);
+                                s.relay[i] = it.param2 > 0.5;
+                                s.cur += 1;
+                            }
+                            Some(it) if it.command == MavCmd::MAV_CMD_NAV_LOITER_TIME => {
+                                let (te, tn) = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
+                                let d;
+                                (de, dn, dz, dyaw, d) = goto(&s, te, tn, it.z as f64, wp_speed);
+                                if d < 2.0 {
+                                    let until = *s.loiter_until.get_or_insert(Instant::now() + Duration::from_secs_f32(it.param1.max(0.0)));
+                                    if Instant::now() >= until {
+                                        s.loiter_until = None;
+                                        s.cur += 1;
+                                        s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
+                                    }
+                                }
+                            }
+                            Some(it) if it.command == MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH => {
+                                s.go_hover("RTL");
+                            }
+                            _ => {
+                                s.go_hover("LOITER");
+                                s.say(MavSeverity::MAV_SEVERITY_INFO, "Missão concluída, mantendo posição");
+                            }
                         }
                     }
-                }
-                "RTL" => {
-                    let ra = rtl_alt.max(s.alt.min(rtl_alt + 50.0));
-                    if s.alt < ra - 1.5 && s.e.hypot(s.n) > 3.0 {
-                        dz = 2.5;
-                    } else {
-                        let d;
-                        (de, dn, dz, dyaw, d) = goto(&s, 0.0, 0.0, ra, wp_speed);
-                        if d < 1.5 {
-                            s.mode = 9;
+                    "RTL" => {
+                        let ra = rtl_alt.max(s.alt.min(rtl_alt + 50.0));
+                        if s.alt < ra - 1.5 && s.e.hypot(s.n) > 3.0 {
+                            dz = 2.5;
+                        } else {
+                            let d;
+                            (de, dn, dz, dyaw, d) = goto(&s, 0.0, 0.0, ra, wp_speed);
+                            if d < 1.5 {
+                                s.go_hover("LAND");
+                            }
                         }
                     }
+                    "LAND" => dz = if s.alt > 6.0 { -2.0 } else { -0.7 },
+                    _ => {}
                 }
-                "LAND" => dz = if s.alt > 6.0 { -2.0 } else { -0.7 },
-                _ => {}
-            }
-            if s.mode == 4 && s.alt < 0.3 && s.target_alt < 0.5 {
-                dz = 0.0;
-            }
-        }
-        // Anticolisão simples usando os setores do LiDAR.
-        let sp = de.hypot(dn);
-        if avoid_dist > 0.0 && sp > 0.3 && s.alt > 0.5 {
-            let rel = wrap(de.atan2(dn).to_degrees() - s.hdg).rem_euclid(360.0);
-            let sec = ((rel / 5.0).round() as usize) % 72;
-            let near = [71, 0, 1].iter().map(|o| sectors[(sec + o) % 72]).min().unwrap_or(u16::MAX);
-            if near != u16::MAX {
-                let o = near as f64 / 100.0;
-                if o < avoid_dist {
-                    let k = ((o - avoid_dist * 0.45) / (avoid_dist * 0.55)).clamp(0.0, 1.0);
-                    de *= k;
-                    dn *= k;
+                if s.hover_mode() == "GUIDED" && s.alt < 0.3 && s.target_alt < 0.5 {
+                    dz = 0.0;
                 }
             }
+            // Anticolisão simples usando os setores do LiDAR.
+            let sp = de.hypot(dn);
+            if avoid_dist > 0.0 && sp > 0.3 && s.alt > 0.5 {
+                let rel = wrap(de.atan2(dn).to_degrees() - s.hdg).rem_euclid(360.0);
+                let sec = ((rel / 5.0).round() as usize) % 72;
+                let near = [71, 0, 1].iter().map(|o| sectors[(sec + o) % 72]).min().unwrap_or(u16::MAX);
+                if near != u16::MAX {
+                    let o = near as f64 / 100.0;
+                    if o < avoid_dist {
+                        let k = ((o - avoid_dist * 0.45) / (avoid_dist * 0.55)).clamp(0.0, 1.0);
+                        de *= k;
+                        dn *= k;
+                    }
+                }
+            }
+            let air = s.alt > 0.15;
+            let k = 1.0 - (-dt * 2.0f64).exp();
+            let (pve, pvn) = (s.ve, s.vn);
+            s.ve += (de - s.ve) * k;
+            s.vn += (dn - s.vn) * k;
+            s.vz += (dz - s.vz) * (1.0 - (-dt * 3.0f64).exp());
+            if air {
+                wind.0 += (rand_gauss(tick) * 1.2 - wind.0) * dt * 0.8;
+                wind.1 += (rand_gauss(tick + 7) * 1.2 - wind.1) * dt * 0.8;
+                s.ve += wind.0 * dt * 0.6;
+                s.vn += wind.1 * dt * 0.6;
+            }
+            s.yaw_rate += (dyaw - s.yaw_rate) * (1.0 - (-dt * 4.0f64).exp());
+            s.hdg = (s.hdg + s.yaw_rate * dt).rem_euclid(360.0);
+            let (pe, pn) = (s.e, s.n);
+            s.e += s.ve * dt;
+            s.n += s.vn * dt;
+            s.alt += s.vz * dt;
+            if s.alt <= 0.0 {
+                s.alt = 0.0;
+                s.vz = s.vz.max(0.0);
+                s.ve *= 0.5;
+                s.vn *= 0.5;
+            }
+            if boxes.iter().any(|b| s.e > b.x0 - 0.4 && s.e < b.x1 + 0.4 && s.n > b.y0 - 0.4 && s.n < b.y1 + 0.4 && s.alt < b.h) {
+                s.e = pe;
+                s.n = pn;
+                s.ve = 0.0;
+                s.vn = 0.0;
+            }
+            let (vf, vr) = (s.ve * fx + s.vn * fy, s.ve * fy - s.vn * fx);
+            let (af, ar) = (((s.ve - pve) * fx + (s.vn - pvn) * fy) / dt, ((s.ve - pve) * fy - (s.vn - pvn) * fx) / dt);
+            s.pitch += ((-(vf * 1.2 + af * 2.4)).clamp(-35.0, 35.0) - s.pitch) * 0.1;
+            s.roll += ((vr * 1.2 + ar * 2.4).clamp(-35.0, 35.0) - s.roll) * 0.1;
+            if s.armed && s.alt < 0.05 && ["LAND", "RTL"].contains(&s.hover_mode().as_str()) {
+                s.landed_t += dt;
+                if s.landed_t > 1.5 {
+                    s.armed = false;
+                    s.go_hover("LOITER");
+                    s.say(MavSeverity::MAV_SEVERITY_INFO, "Pouso concluído, motores desarmados");
+                }
+            }
+        } else {
+            fixed_wing_step(&mut s, dt, &p, &to_en, &mut wind, tick);
         }
         let air = s.alt > 0.15;
-        let k = 1.0 - (-dt * 2.0f64).exp();
-        let (pve, pvn) = (s.ve, s.vn);
-        s.ve += (de - s.ve) * k;
-        s.vn += (dn - s.vn) * k;
-        s.vz += (dz - s.vz) * (1.0 - (-dt * 3.0f64).exp());
-        if air {
-            wind.0 += (rand_gauss(tick) * 1.2 - wind.0) * dt * 0.8;
-            wind.1 += (rand_gauss(tick + 7) * 1.2 - wind.1) * dt * 0.8;
-            s.ve += wind.0 * dt * 0.6;
-            s.vn += wind.1 * dt * 0.6;
-        }
-        s.yaw_rate += (dyaw - s.yaw_rate) * (1.0 - (-dt * 4.0f64).exp());
-        s.hdg = (s.hdg + s.yaw_rate * dt).rem_euclid(360.0);
-        let (pe, pn) = (s.e, s.n);
-        s.e += s.ve * dt;
-        s.n += s.vn * dt;
-        s.alt += s.vz * dt;
-        if s.alt <= 0.0 {
-            s.alt = 0.0;
-            s.vz = s.vz.max(0.0);
-            s.ve *= 0.5;
-            s.vn *= 0.5;
-        }
-        if boxes.iter().any(|b| s.e > b.x0 - 0.4 && s.e < b.x1 + 0.4 && s.n > b.y0 - 0.4 && s.n < b.y1 + 0.4 && s.alt < b.h) {
-            s.e = pe;
-            s.n = pn;
-            s.ve = 0.0;
-            s.vn = 0.0;
-        }
-        let (vf, vr) = (s.ve * fx + s.vn * fy, s.ve * fy - s.vn * fx);
-        let (af, ar) = (((s.ve - pve) * fx + (s.vn - pvn) * fy) / dt, ((s.ve - pve) * fy - (s.vn - pvn) * fx) / dt);
-        s.pitch += ((-(vf * 1.2 + af * 2.4)).clamp(-35.0, 35.0) - s.pitch) * 0.1;
-        s.roll += ((vr * 1.2 + ar * 2.4).clamp(-35.0, 35.0) - s.roll) * 0.1;
-        if s.armed && s.alt < 0.05 && [9, 6].contains(&s.mode) {
-            s.landed_t += dt;
-            if s.landed_t > 1.5 {
-                s.armed = false;
-                s.mode = 5;
-                s.say(MavSeverity::MAV_SEVERITY_INFO, "Pouso concluído, motores desarmados");
-            }
-        }
-        let cur = if !s.armed { 0.4 } else if air { 16.0 + sp * 0.9 + s.vz.max(0.0) * 5.0 } else { 2.2 };
+        let sp = s.ve.hypot(s.vn);
+        let cur = if !s.armed {
+            0.4
+        } else if !s.hovering() {
+            // asa fixa: o motor só empurra; a corrente cresce com a velocidade e a subida
+            if air || s.airspeed > 1.0 { 7.0 + s.airspeed * 0.45 + s.vz.max(0.0) * 3.0 } else { 1.5 }
+        } else if air {
+            16.0 + sp * 0.9 + s.vz.max(0.0) * 5.0
+        } else {
+            2.2
+        };
         s.current += (cur - s.current) * 0.05;
         s.used_mah += s.current * dt / 3.6;
         let soc = (1.0 - s.used_mah / 5000.0).clamp(0.0, 1.0);
-        if fence.0 && air && s.e.hypot(s.n) > fence.1 && ![6, 9].contains(&s.mode) {
-            s.mode = 6;
+        let returning = ["RTL", "LAND", "QRTL", "QLAND"].contains(&s.mode_name().as_str());
+        if fence.0 && air && s.e.hypot(s.n) > fence.1 && !returning {
+            s.go("RTL");
             s.say(MavSeverity::MAV_SEVERITY_CRITICAL, "Geocerca violada: RTL");
         }
-        if air && soc * 5000.0 < p("BATT_LOW_MAH", 750.0) && ![6, 9].contains(&s.mode) {
-            s.mode = 6;
+        if air && soc * 5000.0 < p("BATT_LOW_MAH", 750.0) && !returning {
+            s.go("RTL");
             s.say(MavSeverity::MAV_SEVERITY_CRITICAL, "Bateria baixa: RTL");
         }
 
@@ -647,6 +773,7 @@ fn main() -> anyhow::Result<()> {
         let (lat, lon) = to_ll(s.e, s.n);
         let boot_ms = s.boot.elapsed().as_millis() as u32;
         let texts: Vec<_> = s.texts.drain(..).collect();
+        let airspeed = if s.hovering() { s.ve.hypot(s.vn) } else { s.airspeed };
         let snap = (s.armed, s.mode, s.roll, s.pitch, s.hdg, s.yaw_rate, s.alt, s.ve, s.vn, s.vz, s.current, s.used_mah, s.cur, s.mission.len());
         drop(s);
         let (armed, mode, roll, pitch, hdg, yaw_rate, alt, ve, vn, vz, current, used, cur, mlen) = snap;
@@ -672,7 +799,7 @@ fn main() -> anyhow::Result<()> {
             }
             send(MavMessage::HEARTBEAT(HEARTBEAT_DATA {
                 custom_mode: mode,
-                mavtype: MavType::MAV_TYPE_QUADROTOR,
+                mavtype: class.mav_type(),
                 autopilot: MavAutopilot::MAV_AUTOPILOT_ARDUPILOTMEGA,
                 base_mode: bm,
                 system_status: if armed { MavState::MAV_STATE_ACTIVE } else { MavState::MAV_STATE_STANDBY },
@@ -680,7 +807,8 @@ fn main() -> anyhow::Result<()> {
             }));
             send(MavMessage::BATTERY_STATUS(BATTERY_STATUS_DATA { current_consumed: used as i32, current_battery: (current * 100.0) as i16, battery_remaining: (100.0 * (1.0 - used / 5000.0)).clamp(0.0, 100.0) as i8, ..Default::default() }));
             send(MavMessage::RADIO_STATUS(RADIO_STATUS_DATA { rssi: 200 - (lat - home_lat).abs().min(1.0) as u8, remrssi: 190, noise: 40, remnoise: 45, rxerrors: 0, fixed: 0, txbuf: 100 }));
-            send(MavMessage::MISSION_CURRENT(MISSION_CURRENT_DATA { seq: if mode == 3 { cur } else { 0 }, ..Default::default() }));
+            let auto = modes::mode_name(class, mode) == "AUTO";
+            send(MavMessage::MISSION_CURRENT(MISSION_CURRENT_DATA { seq: if auto { cur } else { 0 }, ..Default::default() }));
             let _ = mlen;
         }
         if tick % 100 == 0 {
@@ -721,16 +849,206 @@ fn main() -> anyhow::Result<()> {
                 hdg: (hdg * 100.0) as u16,
             }));
             let gs = ve.hypot(vn) as f32;
-            send(MavMessage::VFR_HUD(VFR_HUD_DATA { airspeed: gs, groundspeed: gs, alt: HOME_MSL + alt as f32, climb: vz as f32, heading: hdg as i16, throttle: if armed { (48.0 + vz * 6.0).clamp(0.0, 100.0) as u16 } else { 0 } }));
+            send(MavMessage::VFR_HUD(VFR_HUD_DATA { airspeed: airspeed as f32, groundspeed: gs, alt: HOME_MSL + alt as f32, climb: vz as f32, heading: hdg as i16, throttle: if armed { (48.0 + vz * 6.0).clamp(0.0, 100.0) as u16 } else { 0 } }));
         }
         if tick % 2 == 0 {
             send(MavMessage::ATTITUDE(ATTITUDE_DATA { time_boot_ms: boot_ms, roll: (roll as f32).to_radians(), pitch: (pitch as f32).to_radians(), yaw: (wrap(hdg) as f32).to_radians(), rollspeed: 0.0, pitchspeed: 0.0, yawspeed: (yaw_rate as f32).to_radians() }));
         }
         if tick == 1 || tick % 1500 == 0 {
-            eprintln!("[{:>5.0} s] {} {} alt {:.1} m, {} voxels mapeados", start.elapsed().as_secs_f64(), if armed { "armado" } else { "desarmado" }, modes::mode_name(mode), alt, seen.len());
+            eprintln!("[{:>5.0} s] {} {} alt {:.1} m, {} voxels mapeados", start.elapsed().as_secs_f64(), if armed { "armado" } else { "desarmado" }, modes::mode_name(class, mode), alt, seen.len());
         }
         std::thread::sleep(Duration::from_secs_f64(dt).saturating_sub(t0.elapsed()));
     }
+}
+
+/// Física de asa fixa: precisa de velocidade para voar, muda de rumo inclinando
+/// (taxa de curva = g·tan(inclinação)/v) e "para" circulando. Passa por cima dos prédios.
+fn fixed_wing_step(
+    s: &mut Vehicle,
+    dt: f64,
+    p: &dyn Fn(&str, f32) -> f64,
+    to_en: &dyn Fn(f64, f64) -> (f64, f64),
+    wind: &mut (f64, f64),
+    tick: u64,
+) {
+    let cruise = p("AIRSPEED_CRUISE", 18.0).max(STALL_MS + 3.0);
+    let radius = p("WP_LOITER_RAD", 70.0).abs().max(25.0);
+    let wp_radius = p("WP_RADIUS", 30.0).max(5.0);
+    let rtl_alt = p("RTL_ALTITUDE", 80.0);
+    let mode = s.mode_name();
+    let (mx, my, mz, _, mt) = s.manual;
+    let fresh = mt.elapsed() < Duration::from_millis(600);
+    let on_ground = s.alt < 0.2;
+
+    let bearing = |s: &Vehicle, e: f64, n: f64| (e - s.e).atan2(n - s.n).to_degrees().rem_euclid(360.0);
+    // Rumo que mantém um círculo no sentido horário de raio r em torno de (ce, cn).
+    let orbit_hdg = |s: &Vehicle, (ce, cn): (f64, f64), r: f64| {
+        let d = (s.e - ce).hypot(s.n - cn).max(0.1);
+        let radial = (s.e - ce).atan2(s.n - cn).to_degrees();
+        let corr = ((d - r) / r * 70.0).clamp(-70.0, 70.0);
+        (radial + 90.0 + corr).rem_euclid(360.0)
+    };
+    // Centro de um círculo que começa à direita do avião, para entrar nele suavemente.
+    let right_center = |s: &Vehicle, r: f64| {
+        let h = (s.hdg + 90.0).to_radians();
+        (s.e + h.sin() * r, s.n + h.cos() * r)
+    };
+
+    let mut bank_cmd: Option<f64> = None;
+    let mut target_hdg: Option<f64> = None;
+    let mut target_alt = s.target_alt;
+    let mut target_speed = cruise;
+    let mut climb_cmd: Option<f64> = None;
+    let mut takeoff_roll = false;
+
+    if s.armed {
+        match mode.as_str() {
+            "MANUAL" | "STABILIZE" | "FBWA" | "ACRO" | "TRAINING" => {
+                bank_cmd = Some(if fresh { my * MAX_BANK_DEG } else { 0.0 });
+                climb_cmd = Some(if fresh { -mx * 6.0 } else { 0.0 });
+                if fresh {
+                    target_speed = (STALL_MS + 1.0) + mz * (cruise * 1.4 - STALL_MS - 1.0);
+                }
+                takeoff_roll = on_ground && fresh && mz > 0.6;
+            }
+            "FBWB" | "CRUISE" => {
+                bank_cmd = Some(if fresh { my * MAX_BANK_DEG } else { 0.0 });
+                if fresh {
+                    s.target_alt = (s.target_alt - mx * 4.0 * dt).max(5.0);
+                }
+                target_alt = s.target_alt;
+            }
+            "TAKEOFF" => {
+                bank_cmd = Some(0.0);
+                takeoff_roll = true;
+                climb_cmd = Some(if s.airspeed > STALL_MS + 1.0 { 4.0 } else { 0.0 });
+                if !on_ground && s.alt >= s.target_alt - 1.0 {
+                    s.go("LOITER");
+                    s.say(MavSeverity::MAV_SEVERITY_INFO, "Decolagem concluída, circulando");
+                }
+            }
+            "LOITER" | "CIRCLE" | "GUIDED" => {
+                let c = match (mode.as_str(), s.guided_target) {
+                    ("GUIDED", Some(t)) => t,
+                    _ => {
+                        let c = s.orbit.unwrap_or_else(|| right_center(s, radius));
+                        s.orbit = Some(c);
+                        c
+                    }
+                };
+                target_hdg = Some(orbit_hdg(s, c, radius));
+            }
+            "RTL" => {
+                target_alt = rtl_alt;
+                let d = s.e.hypot(s.n);
+                // Volta para casa e circula por cima (o ArduPlane não pousa sozinho no RTL).
+                target_hdg = Some(if d > radius * 1.6 { bearing(s, 0.0, 0.0) } else { orbit_hdg(s, (0.0, 0.0), radius) });
+            }
+            "AUTO" => {
+                let idx = s.cur as usize;
+                match s.mission.get(idx).cloned() {
+                    Some(it) if it.command == MavCmd::MAV_CMD_NAV_TAKEOFF => {
+                        bank_cmd = Some(0.0);
+                        takeoff_roll = true;
+                        climb_cmd = Some(if s.airspeed > STALL_MS + 1.0 { 4.0 } else { 0.0 });
+                        if !on_ground && s.alt >= it.z as f64 - 2.0 {
+                            s.cur += 1;
+                            s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
+                        }
+                    }
+                    Some(it) if it.command == MavCmd::MAV_CMD_NAV_WAYPOINT => {
+                        let (te, tn) = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
+                        target_hdg = Some(bearing(s, te, tn));
+                        target_alt = it.z as f64;
+                        if (te - s.e).hypot(tn - s.n) < wp_radius {
+                            s.cur += 1;
+                            s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
+                        }
+                    }
+                    Some(it) if it.command == MavCmd::MAV_CMD_NAV_LOITER_TIME => {
+                        let c = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
+                        target_alt = it.z as f64;
+                        let d = (c.0 - s.e).hypot(c.1 - s.n);
+                        if s.loiter_until.is_none() && d > radius * 1.3 {
+                            target_hdg = Some(bearing(s, c.0, c.1));
+                        } else {
+                            target_hdg = Some(orbit_hdg(s, c, radius));
+                            let until = *s.loiter_until.get_or_insert(Instant::now() + Duration::from_secs_f32(it.param1.max(0.0)));
+                            if Instant::now() >= until {
+                                s.loiter_until = None;
+                                s.cur += 1;
+                                s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
+                            }
+                        }
+                    }
+                    Some(it) if it.command == MavCmd::MAV_CMD_DO_SET_SERVO => {
+                        s.set_servo(it.param1 as usize, it.param2 as u16);
+                        s.cur += 1;
+                    }
+                    Some(it) if it.command == MavCmd::MAV_CMD_DO_SET_RELAY => {
+                        let i = (it.param1 as usize).min(7);
+                        s.relay[i] = it.param2 > 0.5;
+                        s.cur += 1;
+                    }
+                    Some(it) if it.command == MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH => s.go("RTL"),
+                    _ => {
+                        s.go("LOITER");
+                        s.say(MavSeverity::MAV_SEVERITY_INFO, "Missão concluída, circulando");
+                    }
+                }
+            }
+            _ => bank_cmd = Some(0.0),
+        }
+    }
+
+    // Velocidade: corrida de decolagem acelera; no chão sem decolar, freia.
+    if !s.armed && on_ground || on_ground && !takeoff_roll {
+        s.airspeed = (s.airspeed - 3.0 * dt).max(0.0);
+    } else if on_ground {
+        s.airspeed = (s.airspeed + 3.0 * dt).min(cruise);
+    } else if s.armed {
+        s.airspeed += (target_speed - s.airspeed) * (1.0 - (-dt * 0.6f64).exp());
+    }
+
+    // Inclinação e curva coordenada.
+    let mut bank = match (bank_cmd, target_hdg) {
+        (Some(b), _) => b,
+        (None, Some(h)) => (wrap(h - s.hdg) * 1.1).clamp(-MAX_BANK_DEG, MAX_BANK_DEG),
+        _ => 0.0,
+    };
+    if on_ground {
+        bank = 0.0;
+    }
+    s.roll += (bank - s.roll) * (1.0 - (-dt * 2.5f64).exp());
+    let v = s.airspeed.max(1.0);
+    s.yaw_rate = if on_ground { 0.0 } else { (G * s.roll.to_radians().tan() / v).to_degrees() };
+    s.hdg = (s.hdg + s.yaw_rate * dt).rem_euclid(360.0);
+
+    // Vertical: sobe/desce para o alvo; sem sustentação ou desarmado, afunda.
+    let mut vz = climb_cmd.unwrap_or(((target_alt - s.alt) * 0.35).clamp(-4.0, 4.0));
+    if !on_ground && (s.airspeed < STALL_MS || !s.armed) {
+        vz = vz.min(-3.0);
+    }
+    if on_ground {
+        vz = vz.max(0.0);
+    }
+    s.vz += (vz - s.vz) * (1.0 - (-dt * 1.5f64).exp());
+
+    if !on_ground {
+        wind.0 += (rand_gauss(tick) * 1.5 - wind.0) * dt * 0.5;
+        wind.1 += (rand_gauss(tick + 7) * 1.5 - wind.1) * dt * 0.5;
+    }
+    let (sh, ch) = (s.hdg.to_radians().sin(), s.hdg.to_radians().cos());
+    let w = if on_ground { (0.0, 0.0) } else { *wind };
+    s.ve = s.airspeed * sh + w.0;
+    s.vn = s.airspeed * ch + w.1;
+    s.e += s.ve * dt;
+    s.n += s.vn * dt;
+    s.alt = (s.alt + s.vz * dt).max(0.0);
+    if s.alt == 0.0 {
+        s.vz = s.vz.max(0.0);
+    }
+    s.pitch = (s.vz / v.max(5.0)).atan().to_degrees();
 }
 
 /// Ruído pseudo-gaussiano determinístico e barato.

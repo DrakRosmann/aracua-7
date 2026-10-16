@@ -159,6 +159,7 @@ class Station {
   async initDesktop() {
     if (!isDesktop) return
     this.link = await desktop.status().catch(() => null)
+    if (this.link) this.settings.bridgeUrl = this.link.bridge_url
     const last = savedLink()
     if (!this.link?.running && last) await this.startLink(last)
     else if (!this.link?.running) this.openLinkDialog()
@@ -193,6 +194,7 @@ class Station {
     this.emit('link')
     try {
       this.link = await desktop.start(c)
+      this.settings.bridgeUrl = this.link.bridge_url
       saveLink(c)
       this.linkDialog = false
       this.addLog('ok', `Conexão: ${describeLink(c)}`)

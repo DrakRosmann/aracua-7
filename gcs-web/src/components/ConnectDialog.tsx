@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { station, useChannels } from '../lib/store'
-import { desktop, savedLink, type LinkConfig, type PortInfo } from '../lib/desktop'
+import { desktop, savedLink, SIM_VEHICLES, type LinkConfig, type PortInfo, type SimVehicle } from '../lib/desktop'
 
 type Kind = LinkConfig['kind']
 
@@ -13,6 +13,13 @@ const KINDS: { kind: Kind; title: string; text: string }[] = [
   { kind: 'udp', title: 'Rede (UDP)', text: 'Rádio IP, MAVLink router ou SITL enviando para esta máquina.' },
   { kind: 'tcp', title: 'TCP / SITL', text: 'Conecta num servidor MAVLink TCP, como o SITL do ArduPilot.' },
 ]
+
+const SIM_HINT: Record<SimVehicle, string> = {
+  copter: 'Multirrotor (ArduCopter): decola na vertical, paira e para no ar.',
+  heli: 'Helicóptero (ArduCopter TradHeli): mesmos modos do multirrotor.',
+  plane: 'Avião (ArduPlane): decola correndo no modo TAKEOFF, voa a ~18 m/s e circula para "parar"; LOITER e RTL circulam.',
+  vtol: 'VTOL (ArduPlane QuadPlane): decola na vertical, voa como avião e pousa na vertical nos modos Q (QLAND, QRTL).',
+}
 
 const BAUDS = [57600, 115200, 230400, 460800, 921600, 1500000]
 
@@ -25,6 +32,7 @@ export function ConnectDialog() {
   const [baud, setBaud] = useState(last?.kind === 'serial' ? last.baud : 57600)
   const [listen, setListen] = useState(last?.kind === 'udp' ? last.listen : '0.0.0.0:14550')
   const [address, setAddress] = useState(last?.kind === 'tcp' ? last.address : '127.0.0.1:5760')
+  const [vehicle, setVehicle] = useState<SimVehicle>(last?.kind === 'simulator' ? last.vehicle ?? 'copter' : 'copter')
   const [showLog, setShowLog] = useState(false)
   const logBox = useRef<HTMLPreElement>(null)
 
@@ -41,7 +49,7 @@ export function ConnectDialog() {
 
   const config = (): LinkConfig => {
     switch (kind) {
-      case 'simulator': return { kind }
+      case 'simulator': return { kind, vehicle }
       case 'serial': return { kind, port, baud }
       case 'udp': return { kind, listen }
       case 'tcp': return { kind, address }
@@ -67,8 +75,16 @@ export function ConnectDialog() {
 
         <div className="cx-fields">
           {kind === 'simulator' && (
-            <p className="hint">O simulador decola, segue missões, solta cargas e gera um bairro sintético para o LiDAR.
-              A física é simplificada: para validar voo de verdade, use o SITL do ArduPilot (opção TCP).</p>
+            <>
+              <div className="cx-seg" role="radiogroup" aria-label="Tipo de veículo simulado">
+                {SIM_VEHICLES.map((v) => (
+                  <button key={v.id} type="button" role="radio" aria-checked={vehicle === v.id}
+                    className={vehicle === v.id ? 'on' : ''} onClick={() => setVehicle(v.id)}>{v.label}</button>
+                ))}
+              </div>
+              <p className="hint">{SIM_HINT[vehicle]} O simulador segue missões, solta cargas e gera um bairro sintético para o LiDAR.
+                A física é simplificada: para validar voo de verdade, use o SITL do ArduPilot (opção TCP).</p>
+            </>
           )}
           {kind === 'serial' && (
             <>

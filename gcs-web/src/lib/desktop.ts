@@ -3,8 +3,17 @@
 
 export const isDesktop = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 
+export type SimVehicle = 'copter' | 'heli' | 'plane' | 'vtol'
+
+export const SIM_VEHICLES: { id: SimVehicle; label: string }[] = [
+  { id: 'copter', label: 'Multirrotor' },
+  { id: 'heli', label: 'Helicóptero' },
+  { id: 'plane', label: 'Avião' },
+  { id: 'vtol', label: 'VTOL' },
+]
+
 export type LinkConfig =
-  | { kind: 'simulator'; lat?: number; lon?: number }
+  | { kind: 'simulator'; lat?: number; lon?: number; vehicle?: SimVehicle }
   | { kind: 'serial'; port: string; baud: number }
   | { kind: 'udp'; listen: string }
   | { kind: 'tcp'; address: string }
@@ -37,7 +46,7 @@ export const desktop = {
 export function describeLink(c: LinkConfig | null): string {
   if (!c) return 'desconectado'
   switch (c.kind) {
-    case 'simulator': return 'Simulador'
+    case 'simulator': return `Simulador · ${SIM_VEHICLES.find((v) => v.id === (c.vehicle ?? 'copter'))?.label}`
     case 'serial': return `Rádio ${c.port} · ${c.baud}`
     case 'udp': return `UDP ${c.listen}`
     case 'tcp': return `TCP ${c.address}`

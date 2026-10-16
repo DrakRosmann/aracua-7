@@ -77,8 +77,8 @@ impl Uploader {
     /// Monta a missão no formato do ArduCopter e começa o envio.
     /// `drops[i]` é a entrega no waypoint `i`: chega ao ponto, solta (DO_SET_SERVO/DO_SET_RELAY),
     /// paira `hold_s` segundos no mesmo lugar (NAV_LOITER_TIME) e trava de novo.
-    pub fn start(&mut self, link: &Link, home: (f64, f64, f32), wps: &[Waypoint], drops: &[DropPlan], rtl_at_end: bool) {
-        self.items = build(link.target(), home, wps, drops, rtl_at_end);
+    pub fn start(&mut self, link: &Link, home: (f64, f64, f32), wps: &[Waypoint], drops: &[DropPlan], rtl_at_end: bool, fixed_wing: bool) {
+        self.items = build(link.target(), home, wps, drops, rtl_at_end, fixed_wing);
         self.wp_seq = self.items.iter().filter(|i| i.command == MavCmd::MAV_CMD_NAV_WAYPOINT).skip(1).map(|i| i.seq).collect();
         self.active = true;
         self.retries = 0;
@@ -86,12 +86,19 @@ impl Uploader {
     }
 }
 
-pub fn build(t: (u8, u8), home: (f64, f64, f32), wps: &[Waypoint], drops: &[DropPlan], rtl_at_end: bool) -> Vec<MISSION_ITEM_INT_DATA> {
+/// Ângulo mínimo de subida na decolagem de asa fixa (param1 do NAV_TAKEOFF; o ArduCopter ignora).
+pub const PLANE_TAKEOFF_PITCH_DEG: f32 = 15.0;
+
+pub fn build(t: (u8, u8), home: (f64, f64, f32), wps: &[Waypoint], drops: &[DropPlan], rtl_at_end: bool, fixed_wing: bool) -> Vec<MISSION_ITEM_INT_DATA> {
     {
         let rel = MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT_INT;
         let mut items = vec![item(0, MavCmd::MAV_CMD_NAV_WAYPOINT, MavFrame::MAV_FRAME_GLOBAL_INT, home.0, home.1, home.2, t)];
         let first_alt = wps.first().map(|w| w.alt).unwrap_or(20.0);
-        items.push(item(1, MavCmd::MAV_CMD_NAV_TAKEOFF, rel, 0.0, 0.0, first_alt, t));
+        let mut takeoff = item(1, MavCmd::MAV_CMD_NAV_TAKEOFF, rel, 0.0, 0.0, first_alt, t);
+        if fixed_wing {
+            takeoff.param1 = PLANE_TAKEOFF_PITCH_DEG;
+        }
+        items.push(takeoff);
         for (i, w) in wps.iter().enumerate() {
             let seq = items.len() as u16;
             items.push(item(seq, MavCmd::MAV_CMD_NAV_WAYPOINT, rel, w.lat, w.lon, w.alt, t));
@@ -191,7 +198,9 @@ mod tests {
         let rel = Action { cmd: MavCmd::MAV_CMD_DO_SET_SERVO, p1: 5.0, p2: 1900.0 };
         let lock = Action { cmd: MavCmd::MAV_CMD_DO_SET_SERVO, p1: 5.0, p2: 1100.0 };
         let drops = vec![DropPlan::default(), DropPlan { release: vec![rel], relock: vec![lock], hold_s: 4.0 }];
-        let it = build((1, 1), (-30.0, -51.2, 10.0), &wps, &drops, true);
+        let it = build((1, 1), (-30.0, -51.2, 10.0), &wps, &drops, true, false);
+        assert_eq!(it[1].param1, 0.0);
+        assert_eq!(build((1, 1), (-30.0, -51.2, 10.0), &wps, &drops, true, true)[1].param1, PLANE_TAKEOFF_PITCH_DEG);
         let cmds: Vec<_> = it.iter().map(|i| i.command).collect();
         assert_eq!(
             cmds,

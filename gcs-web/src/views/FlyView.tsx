@@ -8,6 +8,7 @@ import { Icon } from '../components/Icons'
 import { AttitudeTape, Compass, ObstacleRadar, Speedometer } from '../components/Instruments'
 import { Sticks } from '../components/Sticks'
 import { CountdownOverlay, DeliveryPanel, ReleaseFlash } from '../components/Delivery'
+import { vehicleClass } from '../types'
 
 function Section({ title, icon, open, children }: { title: string; icon: ReactNode; open?: boolean; children: ReactNode }) {
   return (
@@ -25,18 +26,28 @@ function FlyRail() {
   const on = !!t?.connected
   const air = !!t?.armed && (t?.alt_rel ?? 0) > 0.5
   const alt = station.settings.takeoffAlt
+  const cls = vehicleClass(t)
+  const wing = cls === 'plane' || cls === 'vtol'
+  // Cada tipo de veículo "para" e pousa de um jeito.
+  const pause = cls === 'rover' ? { mode: 'HOLD', title: 'Para o veículo (Hold)' }
+    : wing ? { mode: 'LOITER', title: 'Circula sobre o ponto atual (Loiter)' }
+      : { mode: 'LOITER', title: 'Segura a posição (Loiter)' }
+  const takeoffTitle = cls === 'rover' ? 'Veículo terrestre: não decola'
+    : wing ? `Decolagem automática (modo TAKEOFF) até ${alt} m${cls === 'vtol' ? ', na vertical' : ', em linha reta'}`
+      : `Decola até ${alt} m no modo Guiado`
   const actions: [string, () => void][] = [
     ['Iniciar missão', () => station.send({ cmd: 'mission_start' })],
-    ['Pousar aqui', () => station.send({ cmd: 'mode', mode: 'LAND' })],
+    ...(cls === 'copter' || cls === 'heli' ? [['Pousar aqui', () => station.send({ cmd: 'mode', mode: 'LAND' })] as [string, () => void]] : []),
+    ...(cls === 'vtol' ? [['Pousar na vertical aqui', () => station.send({ cmd: 'mode', mode: 'QLAND' })] as [string, () => void]] : []),
     ['Tirar foto', () => { station.send({ cmd: 'photo' }); station.stats.photos++ }],
-    ['Freio (parar já)', () => station.send({ cmd: 'mode', mode: 'BRAKE' })],
+    ...(cls === 'copter' || cls === 'heli' ? [['Freio (parar já)', () => station.send({ cmd: 'mode', mode: 'BRAKE' })] as [string, () => void]] : []),
   ]
   return (
     <nav className="rail" aria-label="Ações de voo">
       <div className="rg">
-        <button className="rb" disabled={!on || air} title={`Decola até ${alt} m no modo Guiado`} onClick={() => station.send({ cmd: 'takeoff', alt })}><Icon.takeoff />Decolar</button>
+        <button className="rb" disabled={!on || air || cls === 'rover'} title={takeoffTitle} onClick={() => station.send({ cmd: 'takeoff', alt })}><Icon.takeoff />Decolar</button>
         <button className="rb" disabled={!on || !t?.armed} onClick={() => station.send({ cmd: 'mode', mode: 'RTL' })}><Icon.land />Retornar</button>
-        <button className="rb" disabled={!on || !air} title="Segura a posição (Loiter)" onClick={() => station.send({ cmd: 'mode', mode: 'LOITER' })}><Icon.pause />Pausar</button>
+        <button className="rb" disabled={!on || (!air && cls !== 'rover')} title={pause.title} onClick={() => station.send({ cmd: 'mode', mode: pause.mode })}><Icon.pause />{wing ? 'Circular' : 'Pausar'}</button>
         <button className={`rb ${act ? 'on' : ''}`} disabled={!on} onClick={() => setAct(!act)}><Icon.play />Ação</button>
       </div>
       <div className="rg">
@@ -70,6 +81,9 @@ function FlyPanel() {
   const wp = wi >= 0 ? station.onVehicle[wi] : null
   const avoidOn = (station.params.get('AVOID_ENABLE') ?? 0) > 0
   const n = station.nearest
+  const cls = vehicleClass(t)
+  // Multirrotor freia diante do obstáculo; asa fixa não para: só avisa.
+  const close = (cls === 'plane' || cls === 'vtol') && !t?.mode.startsWith('Q') ? 'OBSTÁCULO PERTO' : 'FREANDO'
   const v = (x: number | undefined, d = 1) => (x === undefined || Number.isNaN(x) ? '—' : x.toFixed(d))
 
   return (
@@ -90,7 +104,7 @@ function FlyPanel() {
         </Section>
         <div className="avrow">
           <Icon.lidar />Anticolisão
-          <b className={!avoidOn ? '' : n < 6 ? 'warn' : 'ok'}>{!station.params.has('AVOID_ENABLE') ? '—' : !avoidOn ? 'INATIVA' : n < 6 ? 'FREANDO' : 'ATIVA'}</b>
+          <b className={!avoidOn ? '' : n < 6 ? 'warn' : 'ok'}>{!station.params.has('AVOID_ENABLE') ? '—' : !avoidOn ? 'INATIVA' : n < 6 ? close : 'ATIVA'}</b>
         </div>
         <Section title="Câmera" icon={<Icon.camera />}>
           <div className="db">

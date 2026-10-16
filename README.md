@@ -14,6 +14,22 @@ reúne tudo:
 | [`hardware/kicad-import/`](hardware/kicad-import/) | importação das peças (LCSC/EasyEDA) para o projeto KiCad |
 | [`hardware/guia-da-placa.pdf`](hardware/guia-da-placa.pdf) | guia de projeto da placa e lista de compras |
 
+## Instalar
+
+Baixe o instalador da [última versão](https://github.com/DrakRosmann/aracua-7/releases/latest):
+`.exe`/`.msi` no Windows, `.AppImage`/`.deb`/`.rpm` no Linux e `.dmg` no macOS.
+
+O app junta a interface, a ponte MAVLink e o simulador. Ao abrir, a tela **Conectar** pergunta
+como chegar ao drone:
+
+* **Simulador** — drone virtual com mapa LiDAR sintético, para treinar e testar sem hardware;
+* **Rádio de telemetria** — escolha a porta serial (rádio SiK a 57600 ou USB da controladora);
+* **Rede (UDP)** — rádio IP, MAVLink router ou SITL enviando para a máquina;
+* **TCP / SITL** — por exemplo `127.0.0.1:5760`.
+
+A escolha fica salva e o app reconecta sozinho na próxima vez; para trocar, use o menu
+**Aracuã-7 ▾ → Trocar conexão**. Detalhes e como compilar o app em [`desktop/`](desktop/).
+
 ## Estação de solo
 
 O software tem três partes:

@@ -57,3 +57,27 @@ jobs:
           colcon build --event-handlers console_cohesion+
           colcon test --event-handlers console_cohesion+
           colcon test-result --verbose
+
+  desktop:
+    name: App desktop (Tauri)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libudev-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            bridge
+            desktop/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Interface (embutida no app)
+        working-directory: gcs-web
+        run: npm ci && npm run build
+      - name: Ponte e simulador para empacotar
+        run: node desktop/scripts/sidecars.mjs
+      - name: Testes do app
+        working-directory: desktop/src-tauri
+        run: cargo test

@@ -36,6 +36,9 @@ struct Args {
     /// Arquivo com a configuração dos compartimentos de entrega, o contador e o histórico
     #[arg(long, default_value = "entrega.json")]
     payload_file: PathBuf,
+    /// Sai quando a entrada padrão fechar (usado pelo app desktop)
+    #[arg(long)]
+    exit_with_parent: bool,
 }
 
 #[derive(Clone)]
@@ -171,10 +174,10 @@ async fn periodic(shared: Arc<Shared>) {
         telem.tick().await;
         tick += 1;
         let snap = shared.state.lock().unwrap().snapshot();
-        if tick % 10 == 0 {
+        if tick.is_multiple_of(10) {
             shared.link.heartbeat();
             // Se o veículo está conectado mas mudo, pede os fluxos de novo.
-            if snap.connected && snap.msgs_per_sec < 5.0 && tick % 50 == 0 {
+            if snap.connected && snap.msgs_per_sec < 5.0 && tick.is_multiple_of(50) {
                 shared.link.request_streams();
             }
         }
@@ -195,7 +198,7 @@ async fn periodic(shared: Arc<Shared>) {
             }
             p.countdown.is_some()
         };
-        if counting || tick % 5 == 0 {
+        if counting || tick.is_multiple_of(5) {
             shared.emit_payload();
         }
         let mut v = serde_json::to_value(&snap).unwrap_or_default();
@@ -297,6 +300,9 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
     let args = Args::parse();
+    if args.exit_with_parent {
+        aracua_bridge::exit_when_stdin_closes();
+    }
     let conn = mavlink::connect::<MavMessage>(&args.mavlink)?;
     tracing::info!("MAVLink em {}", args.mavlink);
     tracing::info!("entrega: configuração em {}", args.payload_file.display());

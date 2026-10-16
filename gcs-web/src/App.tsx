@@ -6,10 +6,20 @@ import { FlyView } from './views/FlyView'
 import { PlanView } from './views/PlanView'
 import { SetupView } from './views/SetupView'
 import { AnalyzeView } from './views/AnalyzeView'
+import { ConnectDialog } from './components/ConnectDialog'
+import { isDesktop } from './lib/desktop'
 
 function ConnectionBanner() {
-  useChannels('conn', 'telemetry')
+  useChannels('conn', 'telemetry', 'link')
   if (station.conn === 'open' && station.telem?.connected) return null
+  if (isDesktop) {
+    const msg = !station.link?.running ? 'Sem conexão com o veículo.' : station.conn !== 'open' ? 'Iniciando a ponte…' : 'Aguardando HEARTBEAT do veículo.'
+    return (
+      <div className="banner" role="status">
+        {msg} <button className="btn" onClick={() => station.openLinkDialog()}>Conectar…</button>
+      </div>
+    )
+  }
   const msg =
     station.conn !== 'open'
       ? `Sem conexão com a ponte em ${station.settings.bridgeUrl}. Rode o aracua-bridge ou ajuste o endereço no menu Aracuã-7.`
@@ -17,10 +27,16 @@ function ConnectionBanner() {
   return <div className="banner" role="status">{msg}</div>
 }
 
+function DesktopLink() {
+  useChannels('link')
+  return station.linkDialog ? <ConnectDialog /> : null
+}
+
 export default function App() {
   useChannels('ui')
   useEffect(() => {
-    station.connect()
+    if (isDesktop) station.initDesktop()
+    else station.connect()
   }, [])
   const v = station.view
   return (
@@ -32,6 +48,7 @@ export default function App() {
       {v === 'setup' && <SetupView />}
       {v === 'analyze' && <AnalyzeView />}
       {(v === 'fly' || v === 'plan') && <ConnectionBanner />}
+      {isDesktop && <DesktopLink />}
     </div>
   )
 }

@@ -5,9 +5,10 @@
 import { useSyncExternalStore } from 'react'
 import { distance, enuToLatLon, type LatLon } from './geo'
 import { decodeMapFrame } from './mapframe'
+import { desktop, describeLink, isDesktop, saveLink, savedLink, type LinkConfig, type LinkStatus } from './desktop'
 import type { ClientCommand, LogEntry, LogLevel, MissionItem, PayloadState, ReleaseEvent, Sample, ServerMessage, Telemetry } from '../types'
 
-export type Channel = 'telemetry' | 'log' | 'params' | 'mission' | 'map' | 'ui' | 'conn' | 'payload'
+export type Channel = 'telemetry' | 'log' | 'params' | 'mission' | 'map' | 'ui' | 'conn' | 'payload' | 'link'
 export type View = 'fly' | 'plan' | 'setup' | 'analyze'
 
 export interface Settings {
@@ -34,6 +35,8 @@ function loadSettings(): Settings {
     const q = new URLSearchParams(location.search).get('bridge')
     const s = { ...DEFAULT_SETTINGS, ...(raw ? JSON.parse(raw) : {}) }
     if (q) s.bridgeUrl = q
+    // No app desktop a ponte é local e iniciada pelo próprio app.
+    if (isDesktop) s.bridgeUrl = 'ws://127.0.0.1:8765'
     return s
   } catch {
     return { ...DEFAULT_SETTINGS }
@@ -104,6 +107,13 @@ class Station {
   private lastPos: LatLon | null = null
   private lastSampleAt = 0
 
+  // App desktop: a ponte é um processo filho; a tela "Conectar" escolhe o veículo.
+  link: LinkStatus | null = null
+  linkDialog = false
+  linkBusy = false
+  linkError = ''
+  private linkPoll = 0
+
   private ws: WebSocket | null = null
   private retry = 0
   private versions = new Map<Channel, number>()
@@ -142,6 +152,64 @@ class Station {
     this.view = v
     if (v === 'fly') this.follow = true
     this.emit('ui')
+  }
+
+  // ---------- app desktop ----------
+  /** Ao abrir o app: reconecta com a última escolha ou mostra a tela "Conectar". */
+  async initDesktop() {
+    if (!isDesktop) return
+    this.link = await desktop.status().catch(() => null)
+    const last = savedLink()
+    if (!this.link?.running && last) await this.startLink(last)
+    else if (!this.link?.running) this.openLinkDialog()
+    // A ponte pode morrer sozinha (rádio desconectado, porta ocupada).
+    clearInterval(this.linkPoll)
+    this.linkPoll = window.setInterval(async () => {
+      const was = this.link?.running
+      this.link = await desktop.status().catch(() => this.link)
+      if (was && !this.link?.running) {
+        this.linkError = `A ponte parou${this.link?.exit_code != null ? ` (código ${this.link.exit_code})` : ''}. Veja o log abaixo.`
+        this.addLog('error', 'A ponte encerrou; escolha a conexão de novo')
+        this.linkDialog = true
+      }
+      this.emit('link')
+    }, 2000)
+  }
+
+  openLinkDialog() {
+    this.linkError = ''
+    this.linkDialog = true
+    this.emit('link')
+  }
+
+  closeLinkDialog() {
+    this.linkDialog = false
+    this.emit('link')
+  }
+
+  async startLink(c: LinkConfig) {
+    this.linkBusy = true
+    this.linkError = ''
+    this.emit('link')
+    try {
+      this.link = await desktop.start(c)
+      saveLink(c)
+      this.linkDialog = false
+      this.addLog('ok', `Conexão: ${describeLink(c)}`)
+      this.connect()
+    } catch (e) {
+      this.linkError = String(e)
+      this.link = await desktop.status().catch(() => null)
+      this.linkDialog = true
+    } finally {
+      this.linkBusy = false
+      this.emit('link')
+    }
+  }
+
+  async stopLink() {
+    this.link = await desktop.stop().catch(() => null)
+    this.emit('link')
   }
 
   // ---------- conexão ----------

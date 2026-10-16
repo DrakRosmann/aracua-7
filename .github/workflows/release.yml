@@ -1,0 +1,80 @@
+name: Release
+
+# Gera os instaladores do app desktop e publica numa release do GitHub.
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  app:
+    name: App (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-22.04
+            args: ''
+          - name: Windows
+            os: windows-latest
+            args: ''
+          - name: macOS (Apple Silicon)
+            os: macos-latest
+            args: --target aarch64-apple-darwin
+          - name: macOS (Intel)
+            os: macos-latest
+            args: --target x86_64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependências do Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libudev-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            bridge
+            desktop/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+        working-directory: gcs-web
+      - run: npm ci
+        working-directory: desktop
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop
+          tagName: ${{ github.ref_type == 'tag' && github.ref_name || 'app-v__VERSION__' }}
+          releaseName: Aracuã-7 ${{ github.ref_type == 'tag' && github.ref_name || 'v__VERSION__' }}
+          releaseBody: |
+            Instaladores da estação de solo Aracuã-7 (interface, ponte MAVLink e simulador num app só).
+
+            | Sistema | Arquivo |
+            |---|---|
+            | Windows | `Aracua-7_*_x64-setup.exe` (ou `.msi`) |
+            | Linux | `.AppImage` (qualquer distribuição), `.deb` (Ubuntu/Debian) ou `.rpm` (Fedora) |
+            | macOS | `.dmg` (`aarch64` para Apple Silicon, `x64` para Intel) |
+
+            Os instaladores ainda não são assinados: o Windows pode mostrar o aviso do SmartScreen
+            (“Mais informações” → “Executar assim mesmo”) e o macOS pede para abrir pelo botão direito → Abrir.
+            No Linux, para usar o rádio pela porta serial, seu usuário precisa estar no grupo `dialout`.
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

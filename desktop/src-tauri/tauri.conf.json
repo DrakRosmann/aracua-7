@@ -1,0 +1,55 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Aracua-7",
+  "mainBinaryName": "aracua-7",
+  "version": "0.1.0",
+  "identifier": "io.github.drakrosmann.aracua7",
+  "build": {
+    "beforeDevCommand": "node scripts/sidecars.mjs && npm --prefix ../gcs-web run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "node scripts/sidecars.mjs && npm --prefix ../gcs-web run build",
+    "frontendDist": "../../gcs-web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Aracuã-7 — Estação de Solo",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 960,
+        "minHeight": 600,
+        "center": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "publisher": "Guilherme de Lima Rosman",
+    "copyright": "© 2026 Guilherme de Lima Rosman · MIT",
+    "category": "Utility",
+    "shortDescription": "Estação de solo do drone Aracuã-7",
+    "longDescription": "Estação de solo para o drone Aracuã-7 (ArduCopter): mapa LiDAR, instrumentos, planejamento de missão, sistema de entrega e configuração. Conecta pelo rádio de telemetria, por UDP/TCP ou ao simulador embutido.",
+    "homepage": "https://github.com/DrakRosmann/aracua-7",
+    "license": "MIT",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "externalBin": ["binaries/aracua-bridge", "binaries/fake-vehicle"],
+    "linux": {
+      "deb": { "depends": ["libudev1"] },
+      "rpm": { "depends": ["systemd-libs"] }
+    },
+    "windows": {
+      "nsis": { "languages": ["PortugueseBR", "English"], "displayLanguageSelector": false }
+    }
+  }
+}

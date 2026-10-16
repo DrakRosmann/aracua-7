@@ -4,6 +4,7 @@ import { clock } from '../lib/format'
 import { FLIGHT_MODES, MODE_LABEL } from '../types'
 import { BatteryIcon, Icon } from './Icons'
 import { DeliveryChip } from './Delivery'
+import { describeLink, isDesktop } from '../lib/desktop'
 
 type Menu = null | 'veh' | 'mode' | 'arm' | 'msgs'
 
@@ -129,13 +130,26 @@ function VehicleMenu({ close }: { close: () => void }) {
       <div className="kv"><span>Sistema</span><b>{t?.connected ? `SYSID ${t.system_id} · ${t.vehicle_type}` : '—'}</b></div>
       <div className="kv"><span>Piloto automático</span><b>{t?.autopilot || '—'}</b></div>
       <div className="kv"><span>Estado</span><b>{t?.connected ? t.system_status : '—'}</b></div>
-      <label className="field-inline" htmlFor="bridgeUrl">Endereço da ponte
-        <input id="bridgeUrl" value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && station.saveSettings({ bridgeUrl: url })} />
-      </label>
-      <div className="brow">
-        <button className="btn on" onClick={() => { station.saveSettings({ bridgeUrl: url }); if (url === station.settings.bridgeUrl) station.connect(); close() }}>Reconectar</button>
-        <button className="btn" onClick={() => { station.setView('setup'); close() }}>Configurar veículo</button>
-      </div>
+      {isDesktop ? (
+        <>
+          <div className="kv"><span>Conexão</span><b>{describeLink(station.link?.running ? station.link.config : null)}</b></div>
+          <div className="brow" style={{ marginTop: 8 }}>
+            <button className="btn on" onClick={() => { station.openLinkDialog(); close() }}>Trocar conexão</button>
+            {station.link?.running && <button className="btn" onClick={() => { station.stopLink(); close() }}>Desconectar</button>}
+            <button className="btn" onClick={() => { station.setView('setup'); close() }}>Configurar veículo</button>
+          </div>
+        </>
+      ) : (
+        <>
+          <label className="field-inline" htmlFor="bridgeUrl">Endereço da ponte
+            <input id="bridgeUrl" value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && station.saveSettings({ bridgeUrl: url })} />
+          </label>
+          <div className="brow">
+            <button className="btn on" onClick={() => { station.saveSettings({ bridgeUrl: url }); if (url === station.settings.bridgeUrl) station.connect(); close() }}>Reconectar</button>
+            <button className="btn" onClick={() => { station.setView('setup'); close() }}>Configurar veículo</button>
+          </div>
+        </>
+      )}
     </div>
   )
 }

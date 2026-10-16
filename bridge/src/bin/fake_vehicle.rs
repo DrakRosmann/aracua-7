@@ -32,6 +32,9 @@ struct Args {
     lat: f64,
     #[arg(long, default_value_t = -46.63331)]
     lon: f64,
+    /// Sai quando a entrada padrão fechar (usado pelo app desktop)
+    #[arg(long)]
+    exit_with_parent: bool,
 }
 
 const HOME_MSL: f32 = 760.0;
@@ -223,6 +226,9 @@ fn wrap(a: f64) -> f64 {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if args.exit_with_parent {
+        aracua_bridge::exit_when_stdin_closes();
+    }
     let conn = Arc::new(mavlink::connect::<MavMessage>(&args.mavlink)?);
     let map_sock = UdpSocket::bind("0.0.0.0:0")?;
     let boxes = world();

@@ -8,22 +8,23 @@ import { SetupView } from './views/SetupView'
 import { AnalyzeView } from './views/AnalyzeView'
 import { ConnectDialog } from './components/ConnectDialog'
 import { isDesktop } from './lib/desktop'
+import { t as tr } from './lib/i18n'
 
 function ConnectionBanner() {
   useChannels('conn', 'telemetry', 'link')
   if (station.conn === 'open' && station.telem?.connected) return null
   if (isDesktop) {
-    const msg = !station.link?.running ? 'Sem conexão com o veículo.' : station.conn !== 'open' ? 'Iniciando a ponte…' : 'Aguardando HEARTBEAT do veículo.'
+    const msg = !station.link?.running ? tr('Sem conexão com o veículo.') : station.conn !== 'open' ? tr('Iniciando a ponte…') : tr('Aguardando HEARTBEAT do veículo.')
     return (
       <div className="banner" role="status">
-        {msg} <button className="btn" onClick={() => station.openLinkDialog()}>Conectar…</button>
+        {msg} <button className="btn" onClick={() => station.openLinkDialog()}>{tr('Conectar…')}</button>
       </div>
     )
   }
   const msg =
     station.conn !== 'open'
-      ? `Sem conexão com a ponte em ${station.settings.bridgeUrl}. Rode o aracua-bridge ou ajuste o endereço no menu Aracuã-7.`
-      : 'Ponte conectada, aguardando HEARTBEAT do veículo.'
+      ? tr('Sem conexão com a ponte em {bridgeUrl}. Rode o aracua-bridge ou ajuste o endereço no menu Aracuã-7.', { bridgeUrl: station.settings.bridgeUrl })
+      : tr('Ponte conectada, aguardando HEARTBEAT do veículo.')
   return <div className="banner" role="status">{msg}</div>
 }
 

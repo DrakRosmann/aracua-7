@@ -1,24 +1,39 @@
-// Configuração: resumo do veículo, parâmetros do ArduCopter e da estação.
+// Configuração: resumo do veículo, parâmetros do firmware (por tipo de veículo),
+// calibração, entrega e a própria estação.
 
 import { useEffect, useState, type ReactNode } from 'react'
-import { station, useChannels, PARAM_IDS } from '../lib/store'
+import { station, useChannels } from '../lib/store'
 import { clamp } from '../lib/format'
 import { DeliverySetup } from '../components/Delivery'
-import { CLASS_LABEL, vehicleClass } from '../types'
+import { Calibration } from '../components/Calibration'
+import { OfflineMap } from '../components/OfflineMap'
+import { flightCards, rtlAltParam, safetyCards, type PCard, type PField } from '../lib/params'
+import { t, tk } from '../lib/i18n'
+import { classLabel, vehicleClass } from '../types'
 
-type Kind = { t: 'number'; unit?: string; scale?: number; min: number; max: number; step?: number } | { t: 'bool' } | { t: 'select'; options: [number, string][] }
+/** Sem resposta do veículo depois disso, o parâmetro não existe neste firmware. */
+const MISSING_AFTER_MS = 5000
 
-function ParamField({ id, label, desc, kind }: { id: string; label: string; desc?: string; kind: Kind }) {
+function ParamField({ id, label, desc, kind }: PField) {
   useChannels('params')
   const raw = station.params.get(id)
   const scale = kind.t === 'number' ? kind.scale ?? 1 : 1
   const shown = raw === undefined ? '' : String(+(raw / scale).toFixed(2))
   const [draft, setDraft] = useState(shown)
   const [pending, setPending] = useState<number | null>(null)
+  const [missingAt, setMissingAt] = useState(0)
   useEffect(() => setDraft(shown), [shown])
   useEffect(() => {
     if (pending !== null && raw !== undefined && Math.abs(raw - pending) < 1e-3) setPending(null)
   }, [raw, pending])
+  // Sem resposta no prazo: "indisponível" (o pedido mais recente é o que conta).
+  const asked = station.paramAsked.get(id)
+  useEffect(() => {
+    if (raw !== undefined || asked === undefined) return
+    const h = setTimeout(() => setMissingAt(asked), Math.max(0, asked + MISSING_AFTER_MS - Date.now()))
+    return () => clearTimeout(h)
+  }, [raw, asked])
+  const missing = raw === undefined && asked !== undefined && missingAt === asked && !!station.telem?.connected
   const commit = (value: number) => {
     if (!Number.isFinite(value)) return
     setPending(value)
@@ -31,7 +46,8 @@ function ParamField({ id, label, desc, kind }: { id: string; label: string; desc
     input = (
       <select id={id} value={raw ?? ''} disabled={raw === undefined} onChange={(e) => commit(+e.target.value)}>
         {raw === undefined && <option value="">—</option>}
-        {kind.options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+        {raw !== undefined && !kind.options.some(([v]) => v === raw) && <option value={raw}>{t('outro ({v})', { v: raw })}</option>}
+        {kind.options.map(([v, l]) => <option key={v} value={v}>{t(l)}</option>)}
       </select>
     )
   } else {
@@ -50,134 +66,156 @@ function ParamField({ id, label, desc, kind }: { id: string; label: string; desc
     )
   }
   return (
-    <div className="field">
-      <label htmlFor={id}>{label}<small>{desc}{desc ? ' · ' : ''}<code>{id}</code></small></label>
+    <div className={`field${missing ? ' missing' : ''}`}>
+      <label htmlFor={id}>{t(label)}<small>{desc ? t(desc) : ''}{desc ? ' · ' : ''}<code>{id}</code></small></label>
       <div className="fin">
         {input}
-        <span className="pstate">{raw === undefined ? 'lendo…' : pending !== null ? 'enviando…' : ''}</span>
+        <span className="pstate">{missing ? t('indisponível neste firmware') : raw === undefined ? t('lendo…') : pending !== null ? t('enviando…') : ''}</span>
       </div>
     </div>
   )
 }
 
+function Cards({ cards }: { cards: PCard[] }) {
+  return cards.map((c) => (
+    <div className="card" key={c.title}><h3>{t(c.title)}</h3>
+      {c.fields.map((f) => <ParamField key={f.id} {...f} />)}
+    </div>
+  ))
+}
+
+const CONN_LABEL = { open: tk('conectada'), connecting: tk('conectando…'), closed: tk('desconectada') } as Record<string, string>
+
 function Summary() {
-  useChannels('telemetry', 'params', 'conn')
-  const t = station.telem
-  const ok = (b: boolean | undefined) => <span className={b ? 'ok' : 'crit'}>{b === undefined ? '—' : b ? 'OK' : 'ATENÇÃO'}</span>
+  useChannels('telemetry', 'params', 'conn', 'replay')
+  const tm = station.telem
+  const cls = vehicleClass(tm)
+  const ok = (b: boolean | undefined) => <span className={b ? 'ok' : 'crit'}>{b === undefined ? '—' : b ? 'OK' : t('ATENÇÃO')}</span>
   const p = (id: string, scale = 1, unit = '') => (station.params.has(id) ? `${+(station.params.get(id)! / scale).toFixed(1)} ${unit}` : '—')
+  const [rtlId, rtlScale] = rtlAltParam(cls)
   return (
     <>
-      <h2>Resumo do veículo</h2>
-      <p className="desc">{t?.connected ? 'Estado atual lido do piloto automático.' : 'Nenhum veículo conectado. Os dados aparecem quando a ponte receber HEARTBEAT.'}</p>
+      <h2>{t('Resumo do veículo')}</h2>
+      <p className="desc">{tm?.connected ? t('Estado atual lido do piloto automático.') : t('Nenhum veículo conectado. Os dados aparecem quando a ponte receber HEARTBEAT.')}</p>
       <div className="sumgrid">
-        <div className="scard"><h4>Veículo {ok(t?.connected)}</h4>
-          <div className="kv"><span>Tipo</span><b>{t?.connected ? `${CLASS_LABEL[vehicleClass(t)]} · ${t.vehicle_type}` : '—'}</b></div>
-          <div className="kv"><span>Piloto automático</span><b>{t?.autopilot || '—'}</b></div>
-          <div className="kv"><span>SYSID</span><b>{t?.system_id ?? '—'}</b></div>
-          <div className="kv"><span>Estado</span><b>{t?.system_status || '—'}</b></div></div>
-        <div className="scard"><h4>Sensores {ok(t?.sensors_healthy)}</h4>
-          <div className="kv"><span>GNSS</span><b>{t ? `${t.gps.fix} · ${t.gps.sats} sat` : '—'}</b></div>
-          <div className="kv"><span>HDOP</span><b>{t ? t.gps.hdop.toFixed(2) : '—'}</b></div>
-          <div className="kv"><span>Vibração máx.</span><b>{t ? `${Math.max(...t.vibration).toFixed(1)} m/s²` : '—'}</b></div>
-          <div className="kv"><span>LiDAR</span><b>{station.sectors ? 'recebendo' : 'sem dados'}</b></div></div>
-        <div className="scard"><h4>Energia {ok(t ? t.battery.remaining > 25 : undefined)}</h4>
-          <div className="kv"><span>Carga</span><b>{t ? `${t.battery.remaining} %` : '—'}</b></div>
-          <div className="kv"><span>Tensão</span><b>{t ? `${t.battery.voltage.toFixed(2)} V` : '—'}</b></div>
-          <div className="kv"><span>Failsafe em</span><b>{p('BATT_LOW_MAH', 1, 'mAh')}</b></div></div>
-        <div className="scard"><h4>Segurança</h4>
-          <div className="kv"><span>Geocerca</span><b>{station.params.get('FENCE_ENABLE') ? p('FENCE_RADIUS', 1, 'm') : station.params.has('FENCE_ENABLE') ? 'desligada' : '—'}</b></div>
-          <div className="kv"><span>Altitude RTL</span><b>{p('RTL_ALT', 100, 'm')}</b></div>
-          <div className="kv"><span>Anticolisão</span><b>{station.params.has('AVOID_ENABLE') ? (station.params.get('AVOID_ENABLE') ? `até ${p('AVOID_DIST_MAX', 1, 'm')}` : 'desligada') : '—'}</b></div></div>
-        <div className="scard"><h4>Ponte</h4>
-          <div className="kv"><span>Conexão</span><b>{station.conn}</b></div>
-          <div className="kv"><span>Versão</span><b>{station.hello?.version ?? '—'}</b></div>
-          <div className="kv"><span>MAVLink</span><b>{station.hello?.mavlink ?? '—'}</b></div></div>
+        <div className="scard"><h4>{t('Veículo')} {ok(tm?.connected)}</h4>
+          <div className="kv"><span>{t('Tipo')}</span><b>{tm?.connected ? `${classLabel(cls)} · ${tm.vehicle_type}` : '—'}</b></div>
+          <div className="kv"><span>{t('Piloto automático')}</span><b>{tm?.autopilot || '—'}</b></div>
+          <div className="kv"><span>SYSID</span><b>{tm?.system_id ?? '—'}</b></div>
+          <div className="kv"><span>{t('Estado')}</span><b>{tm?.system_status || '—'}</b></div></div>
+        <div className="scard"><h4>{t('Sensores')} {ok(tm?.sensors_healthy)}</h4>
+          <div className="kv"><span>GNSS</span><b>{tm ? `${tm.gps.fix} · ${tm.gps.sats} sat` : '—'}</b></div>
+          <div className="kv"><span>HDOP</span><b>{tm ? tm.gps.hdop.toFixed(2) : '—'}</b></div>
+          <div className="kv"><span>{t('Vibração máx.')}</span><b>{tm ? `${Math.max(...tm.vibration).toFixed(1)} m/s²` : '—'}</b></div>
+          <div className="kv"><span>LiDAR</span><b>{station.sectors ? t('recebendo') : t('sem dados')}</b></div></div>
+        <div className="scard"><h4>{t('Energia')} {ok(tm ? tm.battery.remaining > 25 : undefined)}</h4>
+          <div className="kv"><span>{t('Carga')}</span><b>{tm ? `${tm.battery.remaining} %` : '—'}</b></div>
+          <div className="kv"><span>{t('Tensão')}</span><b>{tm ? `${tm.battery.voltage.toFixed(2)} V` : '—'}</b></div>
+          <div className="kv"><span>{t('Failsafe em')}</span><b>{p('BATT_LOW_MAH', 1, 'mAh')}</b></div></div>
+        <div className="scard"><h4>{t('Segurança')}</h4>
+          <div className="kv"><span>{t('Geocerca')}</span><b>{station.params.get('FENCE_ENABLE') ? p('FENCE_RADIUS', 1, 'm') : station.params.has('FENCE_ENABLE') ? t('desligada') : '—'}</b></div>
+          <div className="kv"><span>{t('Altitude RTL')}</span><b>{p(rtlId, rtlScale, 'm')}</b></div>
+          {(cls === 'plane' || cls === 'vtol')
+            ? <div className="kv"><span>{t('Cruzeiro')}</span><b>{p('AIRSPEED_CRUISE', 1, 'm/s')}</b></div>
+            : <div className="kv"><span>{t('Anticolisão')}</span><b>{station.params.has('AVOID_ENABLE') ? (station.params.get('AVOID_ENABLE') ? t('até {d}', { d: p('AVOID_DIST_MAX', 1, 'm') }) : t('desligada')) : '—'}</b></div>}
+        </div>
+        <div className="scard"><h4>{t('Ponte')}</h4>
+          <div className="kv"><span>{t('Conexão')}</span><b>{t(CONN_LABEL[station.conn] ?? station.conn)}</b></div>
+          <div className="kv"><span>{t('Versão')}</span><b>{station.hello?.version ?? '—'}</b></div>
+          <div className="kv"><span>MAVLink</span><b>{station.hello?.mavlink ?? '—'}</b></div>
+          <div className="kv"><span>{t('Gravando em')}</span><b title={station.hello?.log_file ?? ''}>{station.hello?.replay ? t('reprodução') : station.hello?.log_file?.split(/[\\/]/).pop() ?? t('não grava')}</b></div></div>
       </div>
       <div className="brow" style={{ marginTop: 14 }}>
-        <button className="btn" disabled={!t?.connected} onClick={() => PARAM_IDS.forEach((id) => station.send({ cmd: 'param_get', id }, true))}>Reler parâmetros</button>
+        <button className="btn" disabled={!tm?.connected} onClick={() => station.requestParams()}>{t('Reler parâmetros')}</button>
       </div>
     </>
   )
 }
+
+type Settings = typeof station.settings
 
 function StationSettings() {
   useChannels('ui')
   const s = station.settings
   const [d, setD] = useState(s)
-  const field = (k: keyof typeof s, label: string, desc: string, type = 'text') => (
+  const field = (k: 'bridgeUrl' | 'videoUrl' | 'tileUrl' | 'tileAttribution' | 'takeoffAlt', label: string, desc: string, type = 'text') => (
     <div className="field">
       <label htmlFor={`st_${k}`}>{label}<small>{desc}</small></label>
       <div className="fin"><input id={`st_${k}`} type={type} value={d[k]} onChange={(e) => setD({ ...d, [k]: type === 'number' ? +e.target.value : e.target.value })} /></div>
     </div>
   )
+  const choice = <K extends 'lang' | 'theme'>(k: K, label: string, opts: [Settings[K], string][]) => (
+    <div className="field">
+      <label htmlFor={`st_${k}`}>{label}</label>
+      <div className="fin">
+        <select id={`st_${k}`} value={s[k]} onChange={(e) => station.saveSettings({ [k]: e.target.value })}>
+          {opts.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+        </select>
+      </div>
+    </div>
+  )
   return (
     <>
-      <h2>Estação</h2>
-      <p className="desc">Configurações deste computador. Ficam salvas no navegador.</p>
+      <h2>{t('Estação')}</h2>
+      <p className="desc">{t('Configurações deste computador. Ficam salvas no navegador.')}</p>
+      <div className="card"><h3>{t('Aparência')}</h3>
+        {choice('lang', t('Idioma'), [['pt', 'Português (Brasil)'], ['en', 'English']])}
+        {choice('theme', t('Tema'), [['auto', t('Automático (do sistema)')], ['dark', t('Escuro')], ['light', t('Claro')]])}
+        <p className="desc">{t('As mensagens da ponte e do piloto automático aparecem como o veículo as manda.')}</p>
+      </div>
       <div className="card">
-        {field('bridgeUrl', 'Endereço da ponte', 'WebSocket do aracua-bridge')}
-        {field('videoUrl', 'Vídeo da câmera', 'MJPEG, HLS (.m3u8) ou MP4; ex.: saída do MediaMTX')}
-        {field('tileUrl', 'Mapa de fundo', 'URL de tiles raster com {z}/{x}/{y}; recarregue a página para aplicar')}
-        {field('takeoffAlt', 'Altitude de decolagem', 'metros, usada pelo botão Decolar', 'number')}
+        {!station.link && field('bridgeUrl', t('Endereço da ponte'), t('WebSocket do aracua-bridge; inclua ?token=… se a ponte pedir'))}
+        {field('videoUrl', t('Vídeo da câmera'), t('MJPEG, HLS (.m3u8) ou MP4; ex.: saída do MediaMTX'))}
+        {field('tileUrl', t('Mapa de fundo'), t('URL de tiles raster com {z}/{x}/{y}; recarregue a página para aplicar'))}
+        {field('tileAttribution', t('Créditos do mapa'), t('mostrados no canto do mapa'))}
+        {field('takeoffAlt', t('Altitude de decolagem'), t('metros, usada pelo botão Decolar'), 'number')}
       </div>
       <div className="brow" style={{ marginTop: 14 }}>
-        <button className="btn on" onClick={() => station.saveSettings({ ...d, takeoffAlt: clamp(d.takeoffAlt, 2, 120) })}>Salvar</button>
-        <button className="btn" onClick={() => setD(station.settings)}>Descartar</button>
+        <button className="btn on" onClick={() => station.saveSettings({ ...d, lang: s.lang, theme: s.theme, keepTiles: s.keepTiles, takeoffAlt: clamp(d.takeoffAlt, 2, 120) })}>{t('Salvar')}</button>
+        <button className="btn" onClick={() => setD(station.settings)}>{t('Descartar')}</button>
       </div>
+      <OfflineMap />
     </>
   )
 }
 
 const PAGES = [
-  { id: 'resumo', label: 'Resumo' },
-  { id: 'seg', label: 'Segurança' },
-  { id: 'voo', label: 'Parâmetros de voo' },
-  { id: 'entrega', label: 'Entrega' },
-  { id: 'estacao', label: 'Estação' },
+  { id: 'resumo', label: tk('Resumo') },
+  { id: 'seg', label: tk('Segurança') },
+  { id: 'voo', label: tk('Parâmetros de voo') },
+  { id: 'cal', label: tk('Calibração') },
+  { id: 'entrega', label: tk('Entrega') },
+  { id: 'estacao', label: tk('Estação') },
 ] as const
 
 export function SetupView() {
+  useChannels('telemetry')
   const [page, setPage] = useState<(typeof PAGES)[number]['id']>('resumo')
+  const cls = vehicleClass(station.telem)
+  const firmware = cls === 'plane' || cls === 'vtol' ? 'ArduPlane' : cls === 'rover' ? 'ArduRover' : 'ArduCopter'
   return (
-    <section className="page" aria-label="Configuração">
+    <section className="page" aria-label={t('Configuração')}>
       <nav className="pnav">
-        <div className="ph">Configuração</div>
-        {PAGES.map((p) => <button key={p.id} className={page === p.id ? 'on' : ''} onClick={() => setPage(p.id)}>{p.label}</button>)}
+        <div className="ph">{t('Configuração')}</div>
+        {PAGES.map((p) => <button key={p.id} className={page === p.id ? 'on' : ''} onClick={() => setPage(p.id)}>{t(p.label)}</button>)}
       </nav>
       <div className="pbody">
         {page === 'resumo' && <Summary />}
         {page === 'seg' && (
           <>
-            <h2>Segurança</h2>
-            <p className="desc">Failsafes do ArduCopter. Cada mudança é gravada no veículo na hora, inclusive em voo.</p>
-            <div className="card"><h3>Geocerca</h3>
-              <ParamField id="FENCE_ENABLE" label="Geocerca ativa" kind={{ t: 'bool' }} />
-              <ParamField id="FENCE_RADIUS" label="Raio máximo" desc="distância do home" kind={{ t: 'number', unit: 'm', min: 30, max: 10000 }} />
-            </div>
-            <div className="card"><h3>Retorno e energia</h3>
-              <ParamField id="RTL_ALT" label="Altitude de retorno" desc="sobe até ela antes de voltar" kind={{ t: 'number', unit: 'm', scale: 100, min: 2, max: 300 }} />
-              <ParamField id="BATT_LOW_MAH" label="Reserva de bateria" desc="failsafe abaixo desta carga" kind={{ t: 'number', unit: 'mAh', min: 0, max: 20000, step: 50 }} />
-              <ParamField id="BATT_FS_LOW_ACT" label="Ação com bateria baixa" kind={{ t: 'select', options: [[0, 'Só avisar'], [1, 'Pousar'], [2, 'Retornar (RTL)'], [3, 'SmartRTL ou RTL'], [4, 'SmartRTL ou pousar']] }} />
-              <ParamField id="FS_GCS_ENABLE" label="Perda da estação de solo" kind={{ t: 'select', options: [[0, 'Desligado'], [1, 'Retornar (RTL)'], [3, 'SmartRTL ou RTL'], [5, 'Pousar']] }} />
-            </div>
-            <div className="card"><h3>Anticolisão (LiDAR via OBSTACLE_DISTANCE)</h3>
-              <ParamField id="AVOID_ENABLE" label="Anticolisão" kind={{ t: 'select', options: [[0, 'Desligada'], [7, 'Ligada (cerca + proximidade)']] }} />
-              <ParamField id="AVOID_DIST_MAX" label="Distância de frenagem" kind={{ t: 'number', unit: 'm', min: 1, max: 30 }} />
-            </div>
+            <h2>{t('Segurança')}</h2>
+            <p className="desc">{t('Failsafes do {fw} ({cls}). Cada mudança é gravada no veículo na hora, inclusive em voo.', { fw: firmware, cls: classLabel(cls) })}</p>
+            <Cards cards={safetyCards(cls)} />
           </>
         )}
         {page === 'voo' && (
           <>
-            <h2>Parâmetros de voo</h2>
-            <p className="desc">Velocidades usadas pelo piloto automático e pelos sticks.</p>
-            <div className="card">
-              <ParamField id="WPNAV_SPEED" label="Velocidade em missão" kind={{ t: 'number', unit: 'm/s', scale: 100, min: 0.5, max: 20, step: 0.5 }} />
-              <ParamField id="LOIT_SPEED" label="Velocidade máxima manual" desc="modo Posição" kind={{ t: 'number', unit: 'm/s', scale: 100, min: 0.5, max: 20, step: 0.5 }} />
-              <ParamField id="PILOT_SPEED_UP" label="Velocidade de subida" kind={{ t: 'number', unit: 'm/s', scale: 100, min: 0.5, max: 8, step: 0.5 }} />
-              <ParamField id="PILOT_TKOFF_ALT" label="Altitude de decolagem pelo rádio" kind={{ t: 'number', unit: 'm', scale: 100, min: 0, max: 100 }} />
-            </div>
+            <h2>{t('Parâmetros de voo')}</h2>
+            <p className="desc">{t('Ajustes do {fw} para {cls}.', { fw: firmware, cls: classLabel(cls) })}</p>
+            <Cards cards={flightCards(cls)} />
           </>
         )}
+        {page === 'cal' && <Calibration />}
         {page === 'entrega' && <DeliverySetup />}
         {page === 'estacao' && <StationSettings />}
       </div>

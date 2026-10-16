@@ -58,6 +58,43 @@ jobs:
           colcon test --event-handlers console_cohesion+
           colcon test-result --verbose
 
+  simulador:
+    name: Ponta a ponta (simulador)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo build --bins
+        working-directory: bridge
+      - run: node tests/simulador.mjs
+
+  sitl:
+    name: Ponta a ponta (SITL do ArduPilot)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: cargo build --bins
+        working-directory: bridge
+      - run: tests/baixar-sitl.sh
+      - run: node tests/sitl.mjs
+        env:
+          SPEEDUP: '3'
+
   desktop:
     name: App desktop (Tauri)
     runs-on: ubuntu-22.04

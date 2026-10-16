@@ -162,6 +162,12 @@ struct Vehicle {
     airspeed: f64,
     /// Centro do círculo em LOITER/GUIDED (asa fixa).
     orbit: Option<(f64, f64)>,
+    /// Onde começou a perna atual da missão (para a "linha de chegada" do waypoint).
+    leg_start: (f64, f64),
+    /// Calibração do acelerômetro: posição pedida (1–6).
+    accel_step: Option<u32>,
+    /// Calibração da bússola em andamento desde.
+    mag_cal: Option<Instant>,
     e: f64,
     n: f64,
     alt: f64,
@@ -243,14 +249,20 @@ impl Vehicle {
         };
         self.go(q);
     }
-    /// Este instante usa a física de pairar (multirrotor, helicóptero, VTOL em modo Q
-    /// ou na decolagem vertical)?
+    /// Item da missão em execução (em AUTO).
+    fn current_cmd(&self) -> Option<MavCmd> {
+        if self.is("AUTO") { self.mission.get(self.cur as usize).map(|i| i.command) } else { None }
+    }
+    /// Este instante usa a física de pairar (multirrotor, helicóptero, VTOL em modo Q,
+    /// na decolagem vertical ou nos itens VTOL da missão)?
     fn hovering(&self) -> bool {
         match self.class {
             VehicleClass::Plane => false,
             VehicleClass::Vtol => {
                 let m = self.mode_name();
-                m.starts_with('Q') || (m == "TAKEOFF" && self.alt < self.target_alt - 0.5)
+                m.starts_with('Q')
+                    || (m == "TAKEOFF" && self.alt < self.target_alt - 0.5)
+                    || matches!(self.current_cmd(), Some(MavCmd::MAV_CMD_NAV_VTOL_TAKEOFF | MavCmd::MAV_CMD_NAV_VTOL_LAND))
             }
             _ => true,
         }
@@ -276,14 +288,13 @@ impl Vehicle {
             return false;
         }
         self.servo[ch - 1] = pwm;
-        if let Some(b) = switch_bit(ch) {
-            if pwm >= 1500 && self.present[b] {
+        if let Some(b) = switch_bit(ch)
+            && pwm >= 1500 && self.present[b] {
                 self.present[b] = false;
                 self.refill_at[b] = None;
                 let alt = self.alt;
                 self.say(MavSeverity::MAV_SEVERITY_INFO, format!("Entrega: carga da saída {ch} solta a {alt:.1} m"));
             }
-        }
         true
     }
     fn set_mode(&mut self, m: u32) -> bool {
@@ -346,7 +357,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     let v = Arc::new(Mutex::new(Vehicle {
-        class, airspeed: 0.0, orbit: None,
+        class, airspeed: 0.0, orbit: None, leg_start: (0.0, 0.0), accel_step: None, mag_cal: None,
         e: 0.0, n: 0.0, alt: 0.0, ve: 0.0, vn: 0.0, vz: 0.0, hdg: 48.0, roll: 0.0, pitch: 0.0, yaw_rate: 0.0,
         armed: false, mode: modes::mode_number(class, start_mode).unwrap_or(0), target_alt: 0.0, guided_target: None, mission: vec![], incoming: None, cur: 0,
         manual: (0.0, 0.0, 0.5, 0.0, Instant::now()), used_mah: 0.0, current: 0.0, landed_t: 0.0, params,
@@ -450,6 +461,52 @@ fn main() -> anyhow::Result<()> {
                         }
                         ack(&send, c.command, ok);
                     }
+                    MavCmd::MAV_CMD_PREFLIGHT_CALIBRATION => {
+                        let ok = !s.armed;
+                        if ok && c.param5 == 1.0 {
+                            s.accel_step = Some(1);
+                            s.say(MavSeverity::MAV_SEVERITY_INFO, "Place vehicle level and press any key.");
+                            send_accel_pos(&send, 1);
+                        } else if ok && c.param5 == 2.0 {
+                            s.say(MavSeverity::MAV_SEVERITY_INFO, "Trim OK: roll=0.21 pitch=-0.35");
+                        } else if ok && c.param1 == 1.0 {
+                            s.say(MavSeverity::MAV_SEVERITY_INFO, "Gyro calibration complete");
+                        }
+                        ack(&send, c.command, ok);
+                    }
+                    MavCmd::MAV_CMD_ACCELCAL_VEHICLE_POS => {
+                        if let Some(step) = s.accel_step.filter(|st| *st == c.param1 as u32) {
+                            if step >= 6 {
+                                s.accel_step = None;
+                                s.say(MavSeverity::MAV_SEVERITY_INFO, "Calibration successful");
+                                send_accel_pos(&send, 16_777_215);
+                            } else {
+                                s.accel_step = Some(step + 1);
+                                let place = ["", "level", "on its LEFT side", "on its RIGHT side", "nose DOWN", "nose UP", "on its BACK"][step as usize + 1];
+                                s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Place vehicle {place} and press any key."));
+                                send_accel_pos(&send, step + 1);
+                            }
+                        }
+                    }
+                    MavCmd::MAV_CMD_DO_START_MAG_CAL => {
+                        let ok = !s.armed;
+                        if ok {
+                            s.mag_cal = Some(Instant::now());
+                        }
+                        ack(&send, c.command, ok);
+                    }
+                    MavCmd::MAV_CMD_DO_CANCEL_MAG_CAL => {
+                        s.mag_cal = None;
+                        s.say(MavSeverity::MAV_SEVERITY_INFO, "Mag calibration cancelled");
+                        ack(&send, c.command, true);
+                    }
+                    MavCmd::MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN => {
+                        let ok = !s.armed;
+                        if ok {
+                            s.say(MavSeverity::MAV_SEVERITY_WARNING, "Reiniciando (simulado)");
+                        }
+                        ack(&send, c.command, ok);
+                    }
                     MavCmd::MAV_CMD_DO_DIGICAM_CONTROL => {
                         s.say(MavSeverity::MAV_SEVERITY_INFO, "Câmera: foto capturada");
                         ack(&send, c.command, true)
@@ -480,6 +537,14 @@ fn main() -> anyhow::Result<()> {
                             s.incoming = Some((count, items));
                             send(MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA { seq: next, target_system: 255, target_component: 190, ..Default::default() }));
                         }
+                    }
+                }
+                MavMessage::MISSION_REQUEST_LIST(_) => {
+                    send(MavMessage::MISSION_COUNT(MISSION_COUNT_DATA { count: s.mission.len() as u16, target_system: 255, target_component: 190, ..Default::default() }));
+                }
+                MavMessage::MISSION_REQUEST_INT(r) if s.incoming.is_none() => {
+                    if let Some(it) = s.mission.get(r.seq as usize) {
+                        send(MavMessage::MISSION_ITEM_INT(MISSION_ITEM_INT_DATA { target_system: 255, target_component: 190, ..it.clone() }));
                     }
                 }
                 MavMessage::PARAM_REQUEST_READ(p) => {
@@ -557,7 +622,15 @@ fn main() -> anyhow::Result<()> {
                     "AUTO" => {
                         let idx = s.cur as usize;
                         match s.mission.get(idx).cloned() {
-                            Some(it) if it.command == MavCmd::MAV_CMD_NAV_TAKEOFF => {
+                            Some(it) if it.command == MavCmd::MAV_CMD_DO_LAND_START => s.cur += 1,
+                        Some(it) if it.command == MavCmd::MAV_CMD_NAV_LAND || it.command == MavCmd::MAV_CMD_NAV_VTOL_LAND => {
+                            // Vai até o ponto na altura atual e desce na vertical.
+                            let (te, tn) = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
+                            let (a, b, _, y, d) = goto(&s, te, tn, s.alt, wp_speed);
+                            (de, dn, dyaw) = (a, b, y);
+                            dz = if d > 3.0 { 0.0 } else if s.alt > 6.0 { -2.0 } else { -0.7 };
+                        }
+                        Some(it) if it.command == MavCmd::MAV_CMD_NAV_TAKEOFF || it.command == MavCmd::MAV_CMD_NAV_VTOL_TAKEOFF => {
                                 dz = ((it.z as f64 - s.alt) * 0.9).clamp(0.4, 3.5);
                                 if s.alt >= it.z as f64 - 0.5 {
                                     s.cur += 1;
@@ -672,7 +745,8 @@ fn main() -> anyhow::Result<()> {
             let (af, ar) = (((s.ve - pve) * fx + (s.vn - pvn) * fy) / dt, ((s.ve - pve) * fy - (s.vn - pvn) * fx) / dt);
             s.pitch += ((-(vf * 1.2 + af * 2.4)).clamp(-35.0, 35.0) - s.pitch) * 0.1;
             s.roll += ((vr * 1.2 + ar * 2.4).clamp(-35.0, 35.0) - s.roll) * 0.1;
-            if s.armed && s.alt < 0.05 && ["LAND", "RTL"].contains(&s.hover_mode().as_str()) {
+            let landing_item = matches!(s.current_cmd(), Some(MavCmd::MAV_CMD_NAV_LAND | MavCmd::MAV_CMD_NAV_VTOL_LAND));
+        if s.armed && s.alt < 0.05 && (["LAND", "RTL"].contains(&s.hover_mode().as_str()) || landing_item) {
                 s.landed_t += dt;
                 if s.landed_t > 1.5 {
                     s.armed = false;
@@ -730,12 +804,12 @@ fn main() -> anyhow::Result<()> {
                 }
             }
             let sector = ((az as f64 * 2.0 / 5.0) as usize) % 72;
-            if az % 3 == 0 {
+            if az.is_multiple_of(3) {
                 sectors[sector] = u16::MAX;
             }
             sectors[sector] = sectors[sector].min(best);
         }
-        if tick % 10 == 0 && (!pending.is_empty() || first_map) {
+        if tick.is_multiple_of(10) && (!pending.is_empty() || first_map) {
             for chunk in pending.chunks(7000) {
                 let _ = map_sock.send_to(&mapframe::encode_voxels(first_map, (home_lat, home_lon, HOME_MSL), 1.0, chunk), &args.map);
                 first_map = false;
@@ -746,7 +820,7 @@ fn main() -> anyhow::Result<()> {
             }
             pending.clear();
         }
-        if tick % 5 == 0 {
+        if tick.is_multiple_of(5) {
             let _ = map_sock.send_to(&mapframe::encode_sectors(5.0, LIDAR_RANGE as f32, &sectors), &args.map);
         }
 
@@ -772,7 +846,7 @@ fn main() -> anyhow::Result<()> {
         // ---- Telemetria ----
         let (lat, lon) = to_ll(s.e, s.n);
         let boot_ms = s.boot.elapsed().as_millis() as u32;
-        let texts: Vec<_> = s.texts.drain(..).collect();
+        let texts: Vec<_> = std::mem::take(&mut s.texts);
         let airspeed = if s.hovering() { s.ve.hypot(s.vn) } else { s.airspeed };
         let snap = (s.armed, s.mode, s.roll, s.pitch, s.hdg, s.yaw_rate, s.alt, s.ve, s.vn, s.vz, s.current, s.used_mah, s.cur, s.mission.len());
         drop(s);
@@ -780,7 +854,7 @@ fn main() -> anyhow::Result<()> {
         for (sev, t) in texts {
             send(MavMessage::STATUSTEXT(STATUSTEXT_DATA { severity: sev, text: t.as_str().into(), ..Default::default() }));
         }
-        if tick % 10 == 0 {
+        if tick.is_multiple_of(10) {
             send(MavMessage::NAMED_VALUE_FLOAT(NAMED_VALUE_FLOAT_DATA { time_boot_ms: boot_ms, value: ent_sw as f32, name: "ENT_SW".into() }));
             let pwm = |i: usize| if i < 4 { if armed { 1400 } else { 1000 } } else { servo[i] };
             send(MavMessage::SERVO_OUTPUT_RAW(SERVO_OUTPUT_RAW_DATA {
@@ -792,7 +866,7 @@ fn main() -> anyhow::Result<()> {
                 servo13_raw: pwm(12), servo14_raw: pwm(13), servo15_raw: pwm(14), servo16_raw: pwm(15),
             }));
         }
-        if tick % 50 == 0 {
+        if tick.is_multiple_of(50) {
             let mut bm = MavModeFlag::MAV_MODE_FLAG_CUSTOM_MODE_ENABLED | MavModeFlag::MAV_MODE_FLAG_STABILIZE_ENABLED;
             if armed {
                 bm |= MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED;
@@ -811,10 +885,45 @@ fn main() -> anyhow::Result<()> {
             send(MavMessage::MISSION_CURRENT(MISSION_CURRENT_DATA { seq: if auto { cur } else { 0 }, ..Default::default() }));
             let _ = mlen;
         }
-        if tick % 100 == 0 {
+        if tick.is_multiple_of(10) {
+            // Rádio: sticks do controle manual (ou centrados), acelerador no mínimo.
+            let (mx, my, mz, mr, mt) = v.lock().unwrap().manual;
+            let fresh = mt.elapsed() < Duration::from_millis(600);
+            let pwm = |x: f64| (1500.0 + x.clamp(-1.0, 1.0) * 400.0) as u16 + (rand_gauss(tick) * 2.0) as u16;
+            let (roll, pitch, thr, yaw) = if fresh { (pwm(my), pwm(-mx), (1100.0 + mz * 800.0) as u16, pwm(mr)) } else { (pwm(0.0), pwm(0.0), 1100, pwm(0.0)) };
+            send(MavMessage::RC_CHANNELS(RC_CHANNELS_DATA {
+                time_boot_ms: boot_ms, chancount: 8, rssi: 220,
+                chan1_raw: roll, chan2_raw: pitch, chan3_raw: thr, chan4_raw: yaw,
+                chan5_raw: 1100, chan6_raw: 1500, chan7_raw: 1100, chan8_raw: 1900,
+                ..Default::default()
+            }));
+            // Calibração da bússola: ~8 s girando o veículo.
+            let mag = v.lock().unwrap().mag_cal;
+            if let Some(t0) = mag {
+                let pct = (t0.elapsed().as_secs_f64() / 8.0 * 100.0).min(100.0) as u8;
+                if pct < 100 {
+                    send(MavMessage::MAG_CAL_PROGRESS(MAG_CAL_PROGRESS_DATA {
+                        compass_id: 0, cal_mask: 1, attempt: 1, completion_pct: pct,
+                        cal_status: if pct < 50 { MagCalStatus::MAG_CAL_RUNNING_STEP_ONE } else { MagCalStatus::MAG_CAL_RUNNING_STEP_TWO },
+                        ..Default::default()
+                    }));
+                } else {
+                    let mut st = v.lock().unwrap();
+                    st.mag_cal = None;
+                    st.say(MavSeverity::MAV_SEVERITY_INFO, "Compass calibration complete, reboot required");
+                    drop(st);
+                    send(MavMessage::MAG_CAL_REPORT(MAG_CAL_REPORT_DATA {
+                        compass_id: 0, cal_mask: 1, cal_status: MagCalStatus::MAG_CAL_SUCCESS, autosaved: 1,
+                        fitness: 9.4, ofs_x: 31.0, ofs_y: -12.0, ofs_z: 44.0, diag_x: 1.0, diag_y: 1.0, diag_z: 1.0, scale_factor: 1.0,
+                        ..Default::default()
+                    }));
+                }
+            }
+        }
+        if tick.is_multiple_of(100) {
             send(MavMessage::HOME_POSITION(HOME_POSITION_DATA { latitude: (home_lat * 1e7) as i32, longitude: (home_lon * 1e7) as i32, altitude: (HOME_MSL * 1000.0) as i32, ..Default::default() }));
         }
-        if tick % 25 == 0 {
+        if tick.is_multiple_of(25) {
             let soc = (1.0 - used / 5000.0).clamp(0.0, 1.0);
             let all = MavSysStatusSensor::all();
             send(MavMessage::SYS_STATUS(SYS_STATUS_DATA {
@@ -830,13 +939,13 @@ fn main() -> anyhow::Result<()> {
             let vib = if armed && air { 9.0 + sp as f32 * 0.4 + rand_gauss(tick).abs() as f32 * 3.0 } else { 0.3 };
             send(MavMessage::VIBRATION(VIBRATION_DATA { vibration_x: vib, vibration_y: vib * 0.9, vibration_z: vib * 1.3, ..Default::default() }));
         }
-        if tick % 10 == 0 {
+        if tick.is_multiple_of(10) {
             send(MavMessage::GPS_RAW_INT(GPS_RAW_INT_DATA { lat: (lat * 1e7) as i32, lon: (lon * 1e7) as i32, alt: ((HOME_MSL as f64 + alt) * 1000.0) as i32, eph: 70, epv: 110, fix_type: GpsFixType::GPS_FIX_TYPE_RTK_FIXED, satellites_visible: 16, ..Default::default() }));
             if alt < 40.0 {
                 send(MavMessage::RANGEFINDER(RANGEFINDER_DATA { distance: alt as f32 + 0.12, voltage: 1.2 }));
             }
         }
-        if tick % 5 == 0 {
+        if tick.is_multiple_of(5) {
             send(MavMessage::GLOBAL_POSITION_INT(GLOBAL_POSITION_INT_DATA {
                 time_boot_ms: boot_ms,
                 lat: (lat * 1e7) as i32,
@@ -851,14 +960,25 @@ fn main() -> anyhow::Result<()> {
             let gs = ve.hypot(vn) as f32;
             send(MavMessage::VFR_HUD(VFR_HUD_DATA { airspeed: airspeed as f32, groundspeed: gs, alt: HOME_MSL + alt as f32, climb: vz as f32, heading: hdg as i16, throttle: if armed { (48.0 + vz * 6.0).clamp(0.0, 100.0) as u16 } else { 0 } }));
         }
-        if tick % 2 == 0 {
+        if tick.is_multiple_of(2) {
             send(MavMessage::ATTITUDE(ATTITUDE_DATA { time_boot_ms: boot_ms, roll: (roll as f32).to_radians(), pitch: (pitch as f32).to_radians(), yaw: (wrap(hdg) as f32).to_radians(), rollspeed: 0.0, pitchspeed: 0.0, yawspeed: (yaw_rate as f32).to_radians() }));
         }
-        if tick == 1 || tick % 1500 == 0 {
+        if tick == 1 || tick.is_multiple_of(1500) {
             eprintln!("[{:>5.0} s] {} {} alt {:.1} m, {} voxels mapeados", start.elapsed().as_secs_f64(), if armed { "armado" } else { "desarmado" }, modes::mode_name(class, mode), alt, seen.len());
         }
         std::thread::sleep(Duration::from_secs_f64(dt).saturating_sub(t0.elapsed()));
     }
+}
+
+/// A controladora pede uma posição da calibração do acelerômetro com um COMMAND_LONG para a estação.
+fn send_accel_pos(send: &impl Fn(MavMessage), pos: u32) {
+    send(MavMessage::COMMAND_LONG(COMMAND_LONG_DATA {
+        param1: pos as f32,
+        command: MavCmd::MAV_CMD_ACCELCAL_VEHICLE_POS,
+        target_system: 255,
+        target_component: 190,
+        ..Default::default()
+    }));
 }
 
 /// Física de asa fixa: precisa de velocidade para voar, muda de rumo inclinando
@@ -953,6 +1073,7 @@ fn fixed_wing_step(
                         climb_cmd = Some(if s.airspeed > STALL_MS + 1.0 { 4.0 } else { 0.0 });
                         if !on_ground && s.alt >= it.z as f64 - 2.0 {
                             s.cur += 1;
+                            s.leg_start = (s.e, s.n);
                             s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
                         }
                     }
@@ -960,9 +1081,39 @@ fn fixed_wing_step(
                         let (te, tn) = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
                         target_hdg = Some(bearing(s, te, tn));
                         target_alt = it.z as f64;
-                        if (te - s.e).hypot(tn - s.n) < wp_radius {
+                        // Como o ArduPlane: chega dentro do raio (param2, ou WP_RADIUS) ou ao cruzar a
+                        // linha perpendicular à perna no ponto.
+                        let accept = if it.param2 > 0.0 { it.param2 as f64 } else { wp_radius };
+                        let (ls_e, ls_n) = s.leg_start;
+                        let crossed = (te - s.e) * (te - ls_e) + (tn - s.n) * (tn - ls_n) < 0.0;
+                        if (te - s.e).hypot(tn - s.n) < accept || crossed {
                             s.cur += 1;
+                            s.leg_start = (te, tn);
                             s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
+                        }
+                    }
+                    Some(it) if it.command == MavCmd::MAV_CMD_DO_LAND_START => s.cur += 1,
+                    Some(it) if it.command == MavCmd::MAV_CMD_NAV_LAND => {
+                        // Planeio até o ponto de toque, toca e freia na pista.
+                        let (te, tn) = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
+                        let d = (te - s.e).hypot(tn - s.n);
+                        if on_ground {
+                            bank_cmd = Some(0.0);
+                            target_speed = 0.0;
+                            climb_cmd = Some(0.0); // na pista: não volta para a altitude do waypoint anterior
+                            if s.airspeed < 0.5 {
+                                s.armed = false;
+                                s.go("MANUAL");
+                                s.say(MavSeverity::MAV_SEVERITY_INFO, "Pouso concluído, motores desarmados");
+                            }
+                        } else {
+                            if d > 40.0 {
+                                target_hdg = Some(bearing(s, te, tn));
+                            } else {
+                                bank_cmd = Some(0.0);
+                            }
+                            target_speed = STALL_MS + 3.0;
+                            climb_cmd = Some(if s.alt < 1.5 { -0.6 } else { (-(s.alt / (d.max(5.0) / (STALL_MS + 3.0)))).clamp(-3.0, -0.5) });
                         }
                     }
                     Some(it) if it.command == MavCmd::MAV_CMD_NAV_LOITER_TIME => {
@@ -1026,7 +1177,7 @@ fn fixed_wing_step(
 
     // Vertical: sobe/desce para o alvo; sem sustentação ou desarmado, afunda.
     let mut vz = climb_cmd.unwrap_or(((target_alt - s.alt) * 0.35).clamp(-4.0, 4.0));
-    if !on_ground && (s.airspeed < STALL_MS || !s.armed) {
+    if !on_ground && (s.airspeed < STALL_MS || !s.armed) && s.alt > 2.0 {
         vz = vz.min(-3.0);
     }
     if on_ground {

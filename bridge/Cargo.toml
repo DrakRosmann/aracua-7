@@ -1,11 +1,11 @@
 [package]
 name = "aracua-bridge"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
 anyhow = "1.0.104"
-clap = { version = "4.6.7", features = ["derive"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
 futures-util = "0.3.34"
 mavlink = { version = "0.18", features = ["mav2-message-extensions"] }
 serde = { version = "1.0.229", features = ["derive"] }

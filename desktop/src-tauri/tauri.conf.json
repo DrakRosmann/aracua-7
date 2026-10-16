@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Aracua-7",
   "mainBinaryName": "aracua-7",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "io.github.drakrosmann.aracua7",
   "build": {
     "beforeDevCommand": "node scripts/sidecars.mjs && npm --prefix ../gcs-web run dev",

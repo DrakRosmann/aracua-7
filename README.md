@@ -26,7 +26,9 @@ como chegar ao drone:
   multirrotor, helicóptero, avião ou VTOL;
 * **Rádio de telemetria** — escolha a porta serial (rádio SiK a 57600 ou USB da controladora);
 * **Rede (UDP)** — rádio IP, MAVLink router ou SITL enviando para a máquina;
-* **TCP / SITL** — por exemplo `127.0.0.1:5760`.
+* **TCP / SITL** — por exemplo `127.0.0.1:5760`;
+* **Reproduzir voo** — revê um voo gravado (toda conexão é gravada em `.tlog`), com pausa,
+  velocidade de 1× a 16× e barra para pular; nenhum comando sai para veículo algum.
 
 A escolha fica salva e o app reconecta sozinho na próxima vez; para trocar, use o menu
 **Aracuã-7 ▾ → Trocar conexão**. Detalhes e como compilar o app em [`desktop/`](desktop/).
@@ -49,6 +51,33 @@ O software tem três partes:
 ```
 
 O contrato entre as partes está em [`docs/protocolo.md`](docs/protocolo.md).
+
+O que mais a estação faz:
+
+* **Missão no veículo:** ao conectar, a ponte lê a missão gravada no piloto automático e a mostra no
+  mapa (tracejada em Planejar, se for diferente do rascunho); **Ler do veículo** relê e
+  **Editar a missão do veículo** a copia para o plano.
+* **Pré-voo na ponte:** antes de decolar ou iniciar missão no chão, a ponte exige conexão, GPS 3D com
+  6+ satélites, bateria ≥ 25 % e home definido. Se algo falhar, a interface mostra o motivo e oferece
+  "fazer mesmo assim" (o ArduPilot continua fazendo as verificações dele).
+* **Gravação:** todo MAVLink recebido vai para um `.tlog` (o mesmo formato do Mission Planner e do
+  QGroundControl) em `--log-dir` (padrão `logs/`; no app, na pasta de dados do app). `--no-log` desliga.
+* **Mapa offline:** os tiles vistos com internet ficam guardados no navegador; em
+  **Configurar → Estação → Mapa offline** dá para baixar a área enquadrada (até 4000 tiles por vez).
+  Respeite os termos do servidor de tiles.
+* **Calibração guiada:** acelerômetro (6 posições ou só nivelar), bússola com progresso, giroscópio e
+  rádio (captura de extremos e gravação de `RCn_MIN/MAX/TRIM`).
+* **Idioma e tema:** português ou inglês, tema escuro, claro ou o do sistema
+  (**Configurar → Estação → Aparência**). As mensagens da ponte e do ArduPilot aparecem como chegam.
+
+### Acesso pela rede
+
+A ponte escuta só em `127.0.0.1` por padrão. Para abrir a interface de outro computador, use
+`--ws 0.0.0.0:8765`: sem `--token` (ou `ARACUA_TOKEN`), a ponte gera uma senha e mostra no log a URL
+`ws://<ip>:8765/?token=…`; quem conectar sem ela é recusado. Cole a URL com o token em
+**Configurar → Estação → Endereço da ponte**. O app desktop gera um token novo a cada execução, para que
+outro programa ou página aberta no navegador não comande o veículo pela ponte local. O token não é
+criptografia: fora de rede confiável, use VPN.
 
 ## Sistema de entrega
 
@@ -114,9 +143,16 @@ TAKEOFF com `TKOFF_ALT` no avião) e o desenho no mapa.
 | VTOL | VTOL_* | ArduPlane (QuadPlane) |
 | Terrestre | GROUND_ROVER, SURFACE_BOAT | ArduRover (modos e mapa; sem simulador ainda) |
 
-Ainda são do multirrotor: o pouso do avião em missão (`DO_LAND_START`/`NAV_LAND`), os parâmetros
-mostrados em **Configurar** e a entrega em voo do avião (hoje ela paira sobre o ponto, como no
-multirrotor).
+**Configurar** mostra os parâmetros do firmware certo (velocidades e raios do ArduPlane, `Q_*` do VTOL,
+rotor do TradHeli) e marca "indisponível neste firmware" o que o veículo não responde.
+
+Na missão, avião e VTOL podem **terminar pousando** (padrão): a ponte acrescenta `DO_LAND_START`, dois
+pontos de aproximação (500 m/40 m e 250 m/20 m antes do home, no rumo escolhido) e `NAV_LAND`; no VTOL,
+`NAV_VTOL_TAKEOFF`/`NAV_VTOL_LAND`. Para que um RTL também pouse pela sequência, a ponte liga
+`RTL_AUTOLAND = 1` ao enviar (o ArduPlane 4.6+ recusa armar com `DO_LAND_START` e `RTL_AUTOLAND = 0`).
+A **entrega em voo** do avião não para sobre o alvo: a ponte põe o ponto de soltura antes dele, a
+`v·√(2h/g)·0,85` (velocidade de cruzeiro `AIRSPEED_CRUISE`, altura h), com raio de 2 m. É balística
+simples, sem vento: confira no campo.
 
 ## Testar com o SITL do ArduPilot + ROS 2
 
@@ -161,8 +197,21 @@ Para a anticolisão do ArduPilot usar os setores do LiDAR, configure `PRX1_TYPE 
 ```bash
 cd bridge && cargo test                         # modos, quadros do mapa, comandos, missão, entrega
 cd ros2_ws && colcon build && colcon test       # núcleo C++ (gtest)
-cd gcs-web && npm test && npm run build         # decodificação, geometria, tipos + build
+cd gcs-web && npm test && npm run build         # decodificação, geometria, tiles, traduções + build
 ```
+
+De ponta a ponta (Node 22, depois de `cargo build --bins` em `bridge/`):
+
+```bash
+node tests/simulador.mjs          # ponte + fake-vehicle: token, missão e download, entrega em voo do
+                                  # avião, pouso, VTOL, gravação e reprodução, calibrações, rádio
+tests/baixar-sitl.sh              # baixa o SITL oficial (ArduCopter e ArduPlane estáveis) em tests/.sitl
+node tests/sitl.mjs               # ponte + SITL: missão com entrega, download, RTL e pouso (Copter);
+                                  # TAKEOFF, missão e pouso com DO_LAND_START (Plane)
+```
+
+`ONLY=avião node tests/simulador.mjs` roda só os cenários com "avião" no nome. Cada cenário usa portas
+próprias (28700+ e 29700+), sem esbarrar num app aberto.
 
 Os três lados conferem os mesmos quadros binários de referência
 ([`docs/fixtures/`](docs/fixtures/)): se o formato mudar num deles, os testes dos outros quebram.
@@ -178,10 +227,16 @@ podman run --rm -v "$PWD":/repo:Z -w /repo/ros2_ws ros:jazzy-ros-base bash -c \
 
 ## Limitações conhecidas
 
-* O WebSocket da ponte não tem autenticação: rode numa rede local ou VPN.
-* Missões são de waypoints e entregas (mais decolagem e RTL automáticos); não há download da missão do veículo.
+* O token do WebSocket é uma senha simples, sem criptografia (`ws://`, não `wss://`): na rede, use VPN.
+* Missões são de waypoints e entregas (mais decolagem, RTL e pouso automáticos). Ao ler do veículo,
+  itens que a estação não conhece (ex.: `DO_CHANGE_SPEED`) são contados e não mostrados; editar e
+  reenviar uma missão assim descarta esses itens.
 * A contagem regressiva roda na ponte. Entregas feitas pela missão não têm contagem: soltam ao chegar no ponto.
-* Os modos e parâmetros usados são os do ArduCopter. PX4 exige outro mapeamento de modos.
+* Só ArduPilot. PX4 exige outro mapeamento de modos e parâmetros.
+* A interface está em português e inglês; as mensagens da ponte (erros, pré-voo) ficam em português.
+* O ponto de soltura do avião ignora vento e arrasto da carga.
+* A gravação guarda só o que chega do veículo (não o mapa LiDAR, que vem por outro canal); na
+  reprodução o mapa LiDAR fica vazio.
 * A camada LiDAR do mapa desenha até 60 mil obstáculos e 40 mil pontos de solo; para
   mapas maiores, troque a camada GeoJSON por deck.gl.
 * O mapa de satélite padrão usa os tiles públicos da Esri, que exigem internet e atribuição.

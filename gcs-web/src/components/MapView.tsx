@@ -6,9 +6,11 @@ import { Map as MlMap, Marker, setWorkerUrl, type GeoJSONSource, type MapMouseEv
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { station } from '../lib/store'
+import { PROTOCOL_URL, setupTiles } from '../lib/tiles'
 import { circle, rectangle, survey, type LatLon } from '../lib/geo'
 import { wpName } from '../lib/format'
 import { vehicleClass, type VehicleClass } from '../types'
+import { t as tr } from '../lib/i18n'
 
 setWorkerUrl(workerUrl)
 
@@ -54,11 +56,12 @@ export function MapView() {
   useEffect(() => {
     const s = station.settings
     const t0 = station.telem
+    setupTiles(s.tileUrl, s.keepTiles)
     const map = new MlMap({
       container: box.current!,
       style: {
         version: 8,
-        sources: { sat: { type: 'raster', tiles: [s.tileUrl], tileSize: 256, maxzoom: 19, attribution: s.tileAttribution } },
+        sources: { sat: { type: 'raster', tiles: [PROTOCOL_URL], tileSize: 256, maxzoom: 19, attribution: s.tileAttribution } },
         layers: [{ id: 'sat', type: 'raster', source: 'sat' }],
       },
       center: t0 && t0.lat ? [t0.lon, t0.lat] : [-46.63331, -23.55052],
@@ -77,6 +80,11 @@ export function MapView() {
 
     station.mapApi = {
       center: () => ({ lat: map.getCenter().lat, lon: map.getCenter().lng }),
+      zoom: () => map.getZoom(),
+      bounds: () => {
+        const b = map.getBounds()
+        return { west: b.getWest(), south: b.getSouth(), east: b.getEast(), north: b.getNorth() }
+      },
       zoomBy: (d) => map.easeTo({ zoom: map.getZoom() + d, duration: 250 }),
       flyTo: (p) => map.easeTo({ center: [p.lon, p.lat], duration: 600 }),
       fit: (pts) => {
@@ -91,7 +99,7 @@ export function MapView() {
     const src = (id: string) => map.getSource(id) as GeoJSONSource | undefined
 
     map.on('load', () => {
-      for (const id of ['fence', 'trail', 'route', 'survey', 'voxels']) map.addSource(id, { type: 'geojson', data: EMPTY })
+      for (const id of ['fence', 'trail', 'route', 'vmission', 'survey', 'voxels']) map.addSource(id, { type: 'geojson', data: EMPTY })
       map.addLayer({ id: 'voxels', type: 'circle', source: 'voxels', paint: {
         'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 0.6, 18, 2.2, 20, 5],
         'circle-color': ['case', ['==', ['get', 'c'], 0], 'rgba(0,229,255,0.35)',
@@ -101,6 +109,7 @@ export function MapView() {
       map.addLayer({ id: 'fence', type: 'line', source: 'fence', paint: { 'line-color': '#ef4a3c', 'line-width': 2, 'line-dasharray': [4, 3], 'line-opacity': 0.8 } })
       map.addLayer({ id: 'survey-fill', type: 'fill', source: 'survey', filter: ['==', ['geometry-type'], 'Polygon'], paint: { 'fill-color': '#3a78f2', 'fill-opacity': 0.12 } })
       map.addLayer({ id: 'survey-line', type: 'line', source: 'survey', paint: { 'line-color': '#8fb6ff', 'line-width': 1.5, 'line-dasharray': [3, 2] } })
+      map.addLayer({ id: 'vmission', type: 'line', source: 'vmission', paint: { 'line-color': '#f2c94c', 'line-width': 2, 'line-dasharray': [2, 2], 'line-opacity': 0.85 } })
       map.addLayer({ id: 'trail', type: 'line', source: 'trail', paint: { 'line-color': '#2fcf5f', 'line-width': 2.5, 'line-opacity': 0.8 } })
       map.addLayer({ id: 'route', type: 'line', source: 'route', layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: { 'line-color': '#ffffff', 'line-width': 3, 'line-dasharray': [0.1, 2.2] } })
@@ -156,8 +165,9 @@ export function MapView() {
       wpMarkers.forEach((m, i) => m.getElement().classList.toggle('cur', i === active))
     }
     const onMission = () => {
-      const plan = station.plan
       const planning = station.view === 'plan'
+      // Em voo vale o que está no veículo; planejando, o rascunho (e o do veículo tracejado).
+      const plan = planning || !station.onVehicle.length ? station.plan : station.onVehicle
       if (wpMarkers.length !== plan.length) {
         wpMarkers.forEach((m) => m.remove())
         wpMarkers = plan.map((_, i) => {
@@ -190,6 +200,11 @@ export function MapView() {
       const coords = plan.map((w) => [w.lon, w.lat])
       if (planning && t?.home) coords.unshift([t.home.lon, t.home.lat])
       src('route')?.setData(coords.length > 1 ? { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } } : EMPTY)
+      const vm = station.onVehicle
+      const differs = planning && vm.length > 0 && (vm.length !== plan.length || vm.some((w, i) => w.lat !== plan[i].lat || w.lon !== plan[i].lon))
+      const vcoords = vm.map((w) => [w.lon, w.lat])
+      if (t?.home) vcoords.unshift([t.home.lon, t.home.lat])
+      src('vmission')?.setData(differs && vcoords.length > 1 ? { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: vcoords } } : EMPTY)
       const sp = station.surveyPreview
       if (planning && sp) {
         const c = station.mapApi!.center()
@@ -273,7 +288,7 @@ export function MapView() {
           const el = document.createElement('div')
           el.className = 'drop-marker'
           el.innerHTML = `<b>${e.n}</b>`
-          el.title = `Lançamento nº ${e.n} · ${e.name} a ${e.alt_rel.toFixed(1)} m`
+          el.title = tr('Lançamento nº {n} · {name} a {alt_rel} m', { n: e.n, name: e.name, alt_rel: e.alt_rel.toFixed(1) })
           m = new Marker({ element: el }).setLngLat([e.lon, e.lat]).addTo(map)
           dropMarkers.set(e.n, m)
         }
@@ -303,5 +318,5 @@ export function MapView() {
     }
   }, [])
 
-  return <div ref={box} className="map" aria-label="Mapa" />
+  return <div ref={box} className="map" aria-label={tr('Mapa')} />
 }

@@ -339,11 +339,10 @@ impl Payload {
         slot.loaded = false;
         slot.releases += 1;
         let (name, mass, has_switch) = (slot.name.clone(), slot.mass_g, slot.switch_bit.is_some());
-        if let Actuator::Servo { channel, .. } = slot.actuator {
-            if source == "estação" {
+        if let Actuator::Servo { channel, .. } = slot.actuator
+            && source == "estação" {
                 self.commanded.insert(channel, now);
             }
-        }
         self.store.total += 1;
         let ev = ReleaseEvent {
             n: self.store.total,

@@ -86,6 +86,9 @@ pub struct Telemetry {
     pub sensors_healthy: bool,
     pub mission_current: u16,
     pub mission_count: u16,
+    /// Canais do rádio (PWM), para a calibração do rádio na interface.
+    pub rc: Vec<u16>,
+    pub rc_rssi: u8,
     pub msgs_per_sec: f32,
     pub msg_stats: BTreeMap<String, MsgStat>,
 }
@@ -95,12 +98,16 @@ pub enum Event {
     StatusText { severity: u8, text: String },
     Ack { command: String, result: String },
     Param { id: String, value: f32, index: u16, count: u16 },
+    /// Andamento das calibrações (acelerômetro, bússola).
+    Calib(serde_json::Value),
 }
 
 #[derive(Default)]
 pub struct State {
     pub t: Telemetry,
     pub class: modes::VehicleClass,
+    /// Parâmetros já lidos do veículo.
+    pub params: BTreeMap<String, f32>,
     last_heartbeat_ms: u64,
     counts: BTreeMap<&'static str, u64>,
     counts_prev: BTreeMap<&'static str, u64>,
@@ -206,7 +213,42 @@ impl State {
                     fixed: r.fixed,
                 })
             }
-            MISSION_CURRENT(m) => self.t.mission_current = m.seq,
+            MISSION_CURRENT(m) => {
+                self.t.mission_current = m.seq;
+                if m.total != u16::MAX && m.total > 0 {
+                    self.t.mission_count = m.total;
+                }
+            }
+            RC_CHANNELS(r) => {
+                let all = [
+                    r.chan1_raw, r.chan2_raw, r.chan3_raw, r.chan4_raw, r.chan5_raw, r.chan6_raw, r.chan7_raw, r.chan8_raw,
+                    r.chan9_raw, r.chan10_raw, r.chan11_raw, r.chan12_raw, r.chan13_raw, r.chan14_raw, r.chan15_raw, r.chan16_raw,
+                ];
+                self.t.rc = all[..(r.chancount as usize).min(16)].to_vec();
+                self.t.rc_rssi = r.rssi;
+            }
+            // O ArduPilot pede cada posição da calibração do acelerômetro com um COMMAND_LONG para a estação.
+            COMMAND_LONG(c) if c.command == MavCmd::MAV_CMD_ACCELCAL_VEHICLE_POS => {
+                let p = c.param1 as u32;
+                let status = match p {
+                    16_777_215 => "success",
+                    16_777_216 => "failed",
+                    _ => "position",
+                };
+                return Some(Event::Calib(serde_json::json!({"kind":"accel","status":status,"position":p})));
+            }
+            MAG_CAL_PROGRESS(m) => {
+                return Some(Event::Calib(serde_json::json!({
+                    "kind":"compass","compass":m.compass_id,"pct":m.completion_pct,"attempt":m.attempt,
+                    "status":format!("{:?}", m.cal_status).replace("MAG_CAL_", "").to_lowercase(),
+                })));
+            }
+            MAG_CAL_REPORT(m) => {
+                return Some(Event::Calib(serde_json::json!({
+                    "kind":"compass_report","compass":m.compass_id,"fitness":m.fitness,"autosaved":m.autosaved == 1,
+                    "status":format!("{:?}", m.cal_status).replace("MAG_CAL_", "").to_lowercase(),
+                })));
+            }
             STATUSTEXT(s) => {
                 return Some(Event::StatusText {
                     severity: s.severity as u8,
@@ -220,6 +262,7 @@ impl State {
                 })
             }
             PARAM_VALUE(p) => {
+                self.params.insert(char_array_to_string(&p.param_id), p.param_value);
                 return Some(Event::Param {
                     id: char_array_to_string(&p.param_id),
                     value: p.param_value,
@@ -230,6 +273,13 @@ impl State {
             _ => {}
         }
         None
+    }
+
+    /// Reprodução pausada: o veículo não "some" só porque o tempo parou.
+    pub fn hold_heartbeat(&mut self) {
+        if self.last_heartbeat_ms != 0 {
+            self.last_heartbeat_ms = now_ms();
+        }
     }
 
     /// Fotografia do estado para enviar à interface.

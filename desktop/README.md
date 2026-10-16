@@ -16,8 +16,13 @@ junto a ponte (`aracua-bridge`) e o veículo simulado (`fake-vehicle`) como exec
   `kill -9`, eles saem sozinhos.
 * Portas: `ARACUA_WS_PORT` (8765), `ARACUA_SIM_PORT` (14550) e `ARACUA_MAP_PORT` (14600) mudam as
   portas da ponte e do simulador, para rodar duas cópias ao mesmo tempo.
-* O WebSocket escuta só em `127.0.0.1`. O mapa LiDAR do computador de bordo continua chegando por
+* O WebSocket escuta só em `127.0.0.1` e exige um token gerado a cada execução do app (passado à
+  ponte por `ARACUA_TOKEN`, fora da lista de processos): outro programa ou uma página aberta no
+  navegador não comanda o veículo pela ponte local. O mapa LiDAR do computador de bordo continua chegando por
   UDP na porta 14600 (todas as interfaces), como na ponte avulsa.
+* Toda conexão com veículo é gravada em `logs/*.tlog` na pasta de dados do app; a opção
+  **Reproduzir voo** da tela Conectar lista esses arquivos (comando `list_logs`) e sobe a ponte com
+  `--replay`.
 * A configuração da entrega e o contador ficam na pasta de dados do app
   (`~/.local/share/io.github.drakrosmann.aracua7/` no Linux, `%APPDATA%\io.github.drakrosmann.aracua7\` no Windows).
 

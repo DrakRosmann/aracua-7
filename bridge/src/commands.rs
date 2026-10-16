@@ -1,7 +1,7 @@
 //! Comandos vindos da interface e sua tradução para MAVLink.
 
 use crate::link::Link;
-use crate::mission::{DropPlan, Waypoint};
+use crate::mission::{BuildOptions, DropPlan, Waypoint};
 use crate::payload::{Settings, Slot};
 use crate::Shared;
 use aracua_bridge::{apm::*, modes, now_ms};
@@ -14,9 +14,25 @@ use std::time::Duration;
 pub enum Command {
     Arm { arm: bool, #[serde(default)] force: bool },
     Mode { mode: String },
-    Takeoff { alt: f32 },
-    MissionUpload { items: Vec<Waypoint>, #[serde(default = "yes")] rtl_at_end: bool },
-    MissionStart,
+    /// `force` pula as verificações de pré-voo da ponte (GPS, bateria).
+    Takeoff { alt: f32, #[serde(default)] force: bool },
+    MissionUpload {
+        items: Vec<Waypoint>,
+        #[serde(default = "yes")]
+        rtl_at_end: bool,
+        /// Asa fixa: termina com a sequência de pouso em vez de só voltar.
+        #[serde(default)]
+        land_at_end: bool,
+        /// Rumo final do pouso (graus); sem ele, o avião continua do último ponto.
+        #[serde(default)]
+        approach_deg: Option<f32>,
+        /// Velocidade de cruzeiro do avião (m/s), para soltar a carga em voo.
+        #[serde(default)]
+        cruise_ms: Option<f32>,
+    },
+    /// Lê a missão que está no veículo.
+    MissionDownload,
+    MissionStart { #[serde(default)] force: bool },
     Manual { x: f32, y: f32, z: f32, r: f32 },
     ParamGet { id: String },
     ParamSet { id: String, value: f32 },
@@ -42,6 +58,54 @@ pub enum Command {
     PayloadResetCounter,
     /// Pede o estado atual.
     PayloadGet,
+    // ---- Reprodução de voo gravado ----
+    Replay {
+        #[serde(default)]
+        speed: Option<f32>,
+        #[serde(default)]
+        paused: Option<bool>,
+        /// Segundos desde o começo da gravação.
+        #[serde(default)]
+        seek: Option<f64>,
+    },
+    // ---- Calibração ----
+    /// `accel` (6 posições), `level` (nivelar), `gyro`, `compass`, `compass_accept`, `compass_cancel`.
+    Calibrate { kind: String },
+    /// Veículo na posição pedida pela calibração do acelerômetro.
+    AccelPos { position: u32 },
+    /// Reinicia a controladora (só desarmada).
+    Reboot,
+}
+
+/// Comandos que fazem sentido reproduzindo um voo gravado (os outros iriam para lugar nenhum).
+fn allowed_in_replay(c: &Command) -> bool {
+    matches!(c, Command::Replay { .. } | Command::MapReset | Command::PayloadGet)
+}
+
+/// Limites das verificações de pré-voo da ponte.
+pub const MIN_BATTERY_PCT: i8 = 25;
+pub const MIN_SATS: u8 = 6;
+
+/// Verificações de pré-voo antes de decolar ou iniciar missão. Complementam as do ArduPilot:
+/// barram na estação o que costuma dar errado em campo, com a mensagem em português.
+pub fn preflight(t: &crate::state::Telemetry, what: &str) -> Result<(), String> {
+    let fail = |m: String| Err(format!("pré-voo ({what}): {m}"));
+    if !t.connected {
+        return fail("sem conexão com o veículo".into());
+    }
+    if t.gps.fix_type < 3 {
+        return fail(format!("GPS sem fix 3D ({})", if t.gps.fix.is_empty() { "sem GPS" } else { &t.gps.fix }));
+    }
+    if t.gps.sats < MIN_SATS {
+        return fail(format!("só {} satélites (mínimo {MIN_SATS})", t.gps.sats));
+    }
+    if t.battery.remaining >= 0 && t.battery.remaining < MIN_BATTERY_PCT {
+        return fail(format!("bateria em {}% (mínimo {MIN_BATTERY_PCT}%)", t.battery.remaining));
+    }
+    if t.home.is_none() {
+        return fail("o veículo ainda não definiu o home".into());
+    }
+    Ok(())
 }
 
 fn yes() -> bool {
@@ -82,17 +146,38 @@ fn send_param(link: &Link, id: &str, value: f32) -> Result<(), String> {
 /// Executa um comando. Erros voltam para a interface como `{type:"error"}`.
 pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
     let link = &shared.link;
+    if link.is_replay() && !allowed_in_replay(&cmd) {
+        return Err("reproduzindo um voo gravado: comandos ao veículo estão desligados".into());
+    }
     match cmd {
         Command::Arm { arm, force } => {
+            if arm && !force {
+                let t = shared.state.lock().unwrap().t.clone();
+                if !t.connected {
+                    return Err("sem conexão com o veículo".into());
+                }
+                if t.battery.remaining >= 0 && t.battery.remaining < MIN_BATTERY_PCT {
+                    return Err(format!("pré-voo (armar): bateria em {}% (mínimo {MIN_BATTERY_PCT}%)", t.battery.remaining));
+                }
+            }
             let magic = if force { 21196.0 } else { 0.0 };
             link.command_long(MavCmd::MAV_CMD_COMPONENT_ARM_DISARM, [arm as u8 as f32, magic, 0.0, 0.0, 0.0, 0.0, 0.0]);
         }
         Command::Mode { mode } => set_mode(shared, &mode)?,
-        Command::Takeoff { alt } => {
+        Command::Takeoff { alt, force } => {
             if !(1.0..=500.0).contains(&alt) {
                 return Err("altitude de decolagem fora de 1–500 m".into());
             }
-            let class = shared.state.lock().unwrap().class;
+            let (class, t) = {
+                let s = shared.state.lock().unwrap();
+                (s.class, s.t.clone())
+            };
+            if t.armed && t.alt_rel > 1.0 {
+                return Err("o veículo já está no ar".into());
+            }
+            if !force {
+                preflight(&t, "decolar")?;
+            }
             if class == modes::VehicleClass::Rover {
                 return Err("veículo terrestre: não há decolagem".into());
             }
@@ -115,7 +200,7 @@ pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
             }
             link.command_long(MavCmd::MAV_CMD_NAV_TAKEOFF, [0.0, 0.0, 0.0, f32::NAN, 0.0, 0.0, alt]);
         }
-        Command::MissionUpload { items, rtl_at_end } => {
+        Command::MissionUpload { items, rtl_at_end, land_at_end, approach_deg, cruise_ms } => {
             if items.is_empty() {
                 return Err("missão vazia".into());
             }
@@ -153,10 +238,45 @@ pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
                 }
                 drops
             };
-            let fixed_wing = shared.state.lock().unwrap().class.fixed_wing();
-            shared.mission.lock().unwrap().start(link, home, &items, &drops, rtl_at_end, fixed_wing);
+            if shared.downloader.lock().unwrap().is_active() {
+                return Err("aguarde o download da missão terminar".into());
+            }
+            let class = shared.state.lock().unwrap().class;
+            let opts = BuildOptions {
+                class,
+                rtl_at_end,
+                land_at_end,
+                approach_deg,
+                cruise_ms: cruise_ms.filter(|v| (5.0..=80.0).contains(v)).unwrap_or(18.0),
+            };
+            // ArduPlane 4.6+ não arma com DO_LAND_START na missão e RTL_AUTOLAND desligado.
+            if land_at_end && class == modes::VehicleClass::Plane {
+                let cur = shared.state.lock().unwrap().params.get("RTL_AUTOLAND").copied();
+                if !cur.is_some_and(|v| v >= 1.0) {
+                    send_param(link, "RTL_AUTOLAND", 1.0)?;
+                    shared.emit(serde_json::json!({"type":"statustext","severity":5,
+                        "text":"Ponte: RTL_AUTOLAND = 1 (a missão termina com pouso; um RTL também pousa pela sequência)"}));
+                }
+            }
+            let built = crate::mission::build(link.target(), home, &items, &drops, opts);
+            shared.mission.lock().unwrap().start(link, built);
         }
-        Command::MissionStart => {
+        Command::MissionDownload => {
+            if shared.mission.lock().unwrap().is_active() {
+                return Err("aguarde o envio da missão terminar".into());
+            }
+            shared.downloader.lock().unwrap().start(link);
+        }
+        Command::MissionStart { force } => {
+            let t = shared.state.lock().unwrap().t.clone();
+            let on_vehicle = shared.vehicle_mission.lock().unwrap().as_ref().map(|m| m.items.len());
+            if on_vehicle == Some(0) {
+                return Err("não há missão no veículo: envie uma antes".into());
+            }
+            // Já no ar, iniciar a missão é só mudar de modo; no chão, vale o pré-voo.
+            if !force && !(t.armed && t.alt_rel > 1.0) {
+                preflight(&t, "iniciar missão")?;
+            }
             set_mode(shared, "AUTO")?;
             link.command_long(MavCmd::MAV_CMD_MISSION_START, [0.0; 7]);
         }
@@ -279,6 +399,49 @@ pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
             shared.emit_payload();
         }
         Command::PayloadGet => shared.emit_payload(),
+        Command::Replay { speed, paused, seek } => {
+            let ctl = link.replay.as_ref().ok_or("não há voo gravado em reprodução")?;
+            if let Some(s) = speed {
+                ctl.set_speed(s);
+            }
+            if let Some(t) = seek {
+                ctl.seek(t);
+            }
+            if let Some(p) = paused {
+                ctl.set_paused(p);
+            }
+            shared.emit_replay();
+        }
+        Command::Calibrate { kind } => {
+            let armed = shared.state.lock().unwrap().t.armed;
+            if armed {
+                return Err("calibração só com os motores desarmados".into());
+            }
+            use MavCmd::*;
+            match kind.as_str() {
+                // PREFLIGHT_CALIBRATION: param1 giroscópio, param5 = 1 acelerômetro (6 posições), 2 nivelar.
+                "gyro" => link.command_long(MAV_CMD_PREFLIGHT_CALIBRATION, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                "accel" => link.command_long(MAV_CMD_PREFLIGHT_CALIBRATION, [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0]),
+                "level" => link.command_long(MAV_CMD_PREFLIGHT_CALIBRATION, [0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0]),
+                // Bússola: todas (máscara 0), repetir se falhar, salvar sozinho.
+                "compass" => link.command_long(MAV_CMD_DO_START_MAG_CAL, [0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]),
+                "compass_accept" => link.command_long(MAV_CMD_DO_ACCEPT_MAG_CAL, [0.0; 7]),
+                "compass_cancel" => link.command_long(MAV_CMD_DO_CANCEL_MAG_CAL, [0.0; 7]),
+                _ => return Err(format!("calibração desconhecida: {kind}")),
+            }
+        }
+        Command::AccelPos { position } => {
+            if !(1..=6).contains(&position) {
+                return Err("posição de calibração inválida".into());
+            }
+            link.command_long(MavCmd::MAV_CMD_ACCELCAL_VEHICLE_POS, [position as f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        }
+        Command::Reboot => {
+            if shared.state.lock().unwrap().t.armed {
+                return Err("reinício só com os motores desarmados".into());
+            }
+            link.command_long(MavCmd::MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        }
     }
     Ok(())
 }
@@ -359,7 +522,14 @@ mod tests {
         let c: Command = serde_json::from_str(r#"{"cmd":"arm","arm":true}"#).unwrap();
         assert!(matches!(c, Command::Arm { arm: true, force: false }));
         let c: Command = serde_json::from_str(r#"{"cmd":"mission_upload","items":[{"lat":-23.5,"lon":-46.6,"alt":40}]}"#).unwrap();
-        assert!(matches!(c, Command::MissionUpload { rtl_at_end: true, .. }));
+        assert!(matches!(c, Command::MissionUpload { rtl_at_end: true, land_at_end: false, .. }));
+        let c: Command = serde_json::from_str(r#"{"cmd":"mission_upload","items":[],"land_at_end":true,"approach_deg":270,"cruise_ms":20}"#).unwrap();
+        assert!(matches!(c, Command::MissionUpload { land_at_end: true, approach_deg: Some(a), cruise_ms: Some(v), .. } if a == 270.0 && v == 20.0));
+        assert!(matches!(serde_json::from_str::<Command>(r#"{"cmd":"mission_start"}"#).unwrap(), Command::MissionStart { force: false }));
+        assert!(matches!(serde_json::from_str::<Command>(r#"{"cmd":"takeoff","alt":20}"#).unwrap(), Command::Takeoff { force: false, .. }));
+        assert!(matches!(serde_json::from_str::<Command>(r#"{"cmd":"replay","speed":4}"#).unwrap(), Command::Replay { speed: Some(_), paused: None, seek: None }));
+        assert!(matches!(serde_json::from_str::<Command>(r#"{"cmd":"calibrate","kind":"accel"}"#).unwrap(), Command::Calibrate { .. }));
+        assert!(matches!(serde_json::from_str::<Command>(r#"{"cmd":"accel_pos","position":3}"#).unwrap(), Command::AccelPos { position: 3 }));
         let c: Command = serde_json::from_str(r#"{"cmd":"manual","x":0.1,"y":0,"z":0.5,"r":0}"#).unwrap();
         assert!(matches!(c, Command::Manual { .. }));
         assert!(serde_json::from_str::<Command>(r#"{"cmd":"explodir"}"#).is_err());
@@ -368,6 +538,40 @@ mod tests {
         let c: Command = serde_json::from_str(r#"{"cmd":"payload_config","slots":[{"id":1,"name":"A","actuator":{"type":"servo","channel":5,"pwm_locked":1100,"pwm_released":1900}}],"settings":{"countdown_s":3,"min_alt_m":5,"require_armed":true,"relock_s":3,"salvo_interval_s":0.8,"mission_hold_s":4}}"#).unwrap();
         assert!(matches!(c, Command::PayloadConfig { .. }));
     }
+    #[test]
+    fn verificacoes_de_pre_voo() {
+        use crate::state::{Home, Telemetry};
+        let mut t = Telemetry { connected: true, ..Default::default() };
+        t.gps.fix_type = 3;
+        t.gps.fix = "3D_FIX".into();
+        t.gps.sats = 12;
+        t.battery.remaining = 80;
+        t.home = Some(Home { lat: -23.5, lon: -46.6, alt: 760.0 });
+        assert!(preflight(&t, "decolar").is_ok());
+        let check = |f: &dyn Fn(&mut Telemetry), msg: &str| {
+            let mut x = t.clone();
+            f(&mut x);
+            let e = preflight(&x, "decolar").unwrap_err();
+            assert!(e.contains(msg), "{e}");
+        };
+        check(&|x| x.connected = false, "sem conexão");
+        check(&|x| x.gps.fix_type = 2, "GPS sem fix 3D");
+        check(&|x| x.gps.sats = 4, "satélites");
+        check(&|x| x.battery.remaining = 20, "bateria em 20%");
+        check(&|x| x.home = None, "home");
+        // Bateria desconhecida (-1) não bloqueia.
+        let mut x = t.clone();
+        x.battery.remaining = -1;
+        assert!(preflight(&x, "decolar").is_ok());
+    }
+
+    #[test]
+    fn reproducao_so_aceita_controle() {
+        assert!(allowed_in_replay(&Command::Replay { speed: None, paused: Some(true), seek: None }));
+        assert!(!allowed_in_replay(&Command::Arm { arm: true, force: false }));
+        assert!(!allowed_in_replay(&Command::Takeoff { alt: 10.0, force: true }));
+    }
+
     #[test]
     fn param_id_limits() {
         assert!(param_id("FENCE_RADIUS").is_ok());

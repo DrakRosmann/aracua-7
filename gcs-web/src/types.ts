@@ -1,5 +1,7 @@
 // Tipos do protocolo com a ponte (ver docs/protocolo.md).
 
+import { t, tk } from './lib/i18n'
+
 export interface Telemetry {
   type: 'telemetry'
   t: number
@@ -43,13 +45,16 @@ export interface Telemetry {
   sensors_healthy: boolean
   mission_current: number
   mission_count: number
+  /** Canais do rádio em PWM (µs). */
+  rc: number[]
+  rc_rssi: number
   msgs_per_sec: number
   msg_stats: Record<string, { count: number; hz: number }>
 }
 
 export type ServerMessage =
   | Telemetry
-  | { type: 'hello'; bridge: string; version: string; mavlink: string }
+  | { type: 'hello'; bridge: string; version: string; mavlink: string; replay?: boolean; log_file?: string | null }
   | { type: 'statustext'; severity: number; text: string }
   | { type: 'ack'; command: string; result: string }
   | { type: 'param'; id: string; value: number; index: number; count: number }
@@ -59,6 +64,34 @@ export type ServerMessage =
   | PayloadState
   | { type: 'payload_release'; event: ReleaseEvent }
   | { type: 'payload_confirm'; event: ReleaseEvent }
+  | VehicleMission
+  | ReplayState
+  | CalibEvent
+
+/** Missão que está no veículo (lida dele ou acabada de enviar). */
+export interface VehicleMission {
+  type: 'vehicle_mission'
+  items: MissionItem[]
+  wp_seq: number[]
+  rtl_at_end: boolean
+  land_at_end: boolean
+  ignored: number
+  count: number
+}
+
+export interface ReplayState {
+  type: 'replay'
+  file: string
+  t: number
+  duration: number
+  speed: number
+  paused: boolean
+}
+
+export type CalibEvent =
+  | { type: 'calib'; kind: 'accel'; status: 'position' | 'success' | 'failed'; position: number }
+  | { type: 'calib'; kind: 'compass'; compass: number; pct: number; attempt: number; status: string }
+  | { type: 'calib'; kind: 'compass_report'; compass: number; fitness: number; autosaved: boolean; status: string }
 
 // ---------- Sistema de entrega ----------
 
@@ -129,9 +162,14 @@ export interface MissionItem {
 export type ClientCommand =
   | { cmd: 'arm'; arm: boolean; force?: boolean }
   | { cmd: 'mode'; mode: string }
-  | { cmd: 'takeoff'; alt: number }
-  | { cmd: 'mission_upload'; items: MissionItem[]; rtl_at_end?: boolean }
-  | { cmd: 'mission_start' }
+  | { cmd: 'takeoff'; alt: number; force?: boolean }
+  | { cmd: 'mission_upload'; items: MissionItem[]; rtl_at_end?: boolean; land_at_end?: boolean; approach_deg?: number | null; cruise_ms?: number }
+  | { cmd: 'mission_download' }
+  | { cmd: 'mission_start'; force?: boolean }
+  | { cmd: 'replay'; speed?: number; paused?: boolean; seek?: number }
+  | { cmd: 'calibrate'; kind: 'accel' | 'level' | 'gyro' | 'compass' | 'compass_accept' | 'compass_cancel' }
+  | { cmd: 'accel_pos'; position: number }
+  | { cmd: 'reboot' }
   | { cmd: 'manual'; x: number; y: number; z: number; r: number }
   | { cmd: 'param_get'; id: string }
   | { cmd: 'param_set'; id: string; value: number }
@@ -154,11 +192,11 @@ export type ClientCommand =
 export type VehicleClass = 'copter' | 'heli' | 'plane' | 'vtol' | 'rover'
 
 export const CLASS_LABEL: Record<VehicleClass, string> = {
-  copter: 'Multirrotor',
-  heli: 'Helicóptero',
-  plane: 'Avião',
-  vtol: 'VTOL',
-  rover: 'Terrestre',
+  copter: tk('Multirrotor'),
+  heli: tk('Helicóptero'),
+  plane: tk('Avião'),
+  vtol: tk('VTOL'),
+  rover: tk('Terrestre'),
 }
 
 const COPTER_MENU = ['STABILIZE', 'ALT_HOLD', 'LOITER', 'POSHOLD', 'GUIDED', 'AUTO', 'RTL', 'LAND', 'BRAKE']
@@ -186,38 +224,42 @@ export const MANUAL_MODES: Record<VehicleClass, Set<string>> = {
 }
 
 const MODE_LABEL: Record<string, string> = {
-  STABILIZE: 'Estabilizado',
-  ALT_HOLD: 'Altitude',
-  LOITER: 'Posição',
-  POSHOLD: 'PosHold',
-  GUIDED: 'Guiado',
-  AUTO: 'Missão',
-  RTL: 'Retornar',
-  LAND: 'Pouso',
-  BRAKE: 'Freio',
-  SMART_RTL: 'Retorno inteligente',
-  MANUAL: 'Manual',
-  ACRO: 'Acro',
-  TRAINING: 'Treino',
-  FBWA: 'Assistido (FBWA)',
-  FBWB: 'Altitude (FBWB)',
-  CRUISE: 'Cruzeiro',
-  CIRCLE: 'Círculo',
-  TAKEOFF: 'Decolagem',
-  QSTABILIZE: 'Q Estabilizado',
-  QHOVER: 'Q Pairar',
-  QLOITER: 'Q Posição',
-  QLAND: 'Q Pouso',
-  QRTL: 'Q Retornar',
-  HOLD: 'Parado',
-  STEERING: 'Direção',
+  STABILIZE: tk('Estabilizado'),
+  ALT_HOLD: tk('Altitude'),
+  LOITER: tk('Posição'),
+  POSHOLD: tk('PosHold'),
+  GUIDED: tk('Guiado'),
+  AUTO: tk('Missão'),
+  RTL: tk('Retornar'),
+  LAND: tk('Pouso'),
+  BRAKE: tk('Freio'),
+  SMART_RTL: tk('Retorno inteligente'),
+  MANUAL: tk('Manual'),
+  ACRO: tk('Acro'),
+  TRAINING: tk('Treino'),
+  FBWA: tk('Assistido (FBWA)'),
+  FBWB: tk('Altitude (FBWB)'),
+  CRUISE: tk('Cruzeiro'),
+  CIRCLE: tk('Círculo'),
+  TAKEOFF: tk('Decolagem'),
+  QSTABILIZE: tk('Q Estabilizado'),
+  QHOVER: tk('Q Pairar'),
+  QLOITER: tk('Q Posição'),
+  QLAND: tk('Q Pouso'),
+  QRTL: tk('Q Retornar'),
+  HOLD: tk('Parado'),
+  STEERING: tk('Direção'),
 }
 
 /** Nome do modo para mostrar. LOITER no avião é circular, não pairar. */
 export function modeLabel(mode: string, cls: VehicleClass): string {
-  if (mode === 'LOITER' && (cls === 'plane' || cls === 'vtol')) return 'Circular'
-  if (mode === 'LOITER' && cls === 'rover') return 'Segurar posição'
-  return MODE_LABEL[mode] ?? mode
+  if (mode === 'LOITER' && (cls === 'plane' || cls === 'vtol')) return t('Circular')
+  if (mode === 'LOITER' && cls === 'rover') return t('Segurar posição')
+  return MODE_LABEL[mode] ? t(MODE_LABEL[mode]) : mode
+}
+
+export function classLabel(cls: VehicleClass): string {
+  return t(CLASS_LABEL[cls])
 }
 
 export function vehicleClass(t: Telemetry | null | undefined): VehicleClass {

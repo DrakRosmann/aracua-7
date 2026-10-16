@@ -4,6 +4,7 @@
 import { useEffect, useRef } from 'react'
 import { station } from '../lib/store'
 import type { Telemetry } from '../types'
+import { t as tr } from '../lib/i18n'
 
 const DEG = Math.PI / 180
 const F = (w: number, s: number) => `${w} ${Math.round(s)}px Roboto, system-ui, sans-serif`
@@ -150,18 +151,18 @@ function drawRadar(ctx: CanvasRenderingContext2D, w: number, h: number, t: Telem
   ctx.fillText('N', cx + Math.sin(na) * (R - 12), cy - Math.cos(na) * (R - 12))
   ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(cx, cy - 7); ctx.lineTo(cx + 5, cy + 5); ctx.lineTo(cx - 5, cy + 5); ctx.closePath(); ctx.stroke()
   ctx.font = F(500, 9); ctx.fillStyle = '#a2a9b4'
-  ctx.fillText(sec ? `LIDAR · ${Number.isFinite(station.nearest) ? station.nearest.toFixed(1) + ' m' : 'livre'}` : 'LIDAR · sem dados', cx, cy + R * 0.55)
+  ctx.fillText(sec ? `LIDAR · ${Number.isFinite(station.nearest) ? station.nearest.toFixed(1) + ' m' : tr('livre')}` : tr('LIDAR · sem dados'), cx, cy + R * 0.55)
 }
 
 export function AttitudeTape() {
-  return <canvas ref={useCanvasLoop(drawAttitude)} id="cvAtt" aria-label="Atitude e altitude" />
+  return <canvas ref={useCanvasLoop(drawAttitude)} id="cvAtt" aria-label={tr('Atitude e altitude')} />
 }
 export function Speedometer() {
-  return <canvas ref={useCanvasLoop(drawSpeed)} id="cvSpeed" className="dial" aria-label="Velocidade" />
+  return <canvas ref={useCanvasLoop(drawSpeed)} id="cvSpeed" className="dial" aria-label={tr('Velocidade')} />
 }
 export function Compass() {
-  return <canvas ref={useCanvasLoop(drawCompass)} id="cvCompass" className="dial" aria-label="Bússola" />
+  return <canvas ref={useCanvasLoop(drawCompass)} id="cvCompass" className="dial" aria-label={tr('Bússola')} />
 }
 export function ObstacleRadar() {
-  return <canvas ref={useCanvasLoop(drawRadar)} id="cvRadar" className="dial" aria-label="Radar de obstáculos" />
+  return <canvas ref={useCanvasLoop(drawRadar)} id="cvRadar" className="dial" aria-label={tr('Radar de obstáculos')} />
 }

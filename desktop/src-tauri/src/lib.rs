@@ -29,6 +29,20 @@ fn port(var: &str, default: u16) -> u16 {
 fn bridge_ws() -> String {
     format!("127.0.0.1:{}", port("ARACUA_WS_PORT", DEFAULT_WS_PORT))
 }
+/// Senha do WebSocket desta execução do app: só a janela do app a conhece, então
+/// outro programa ou página aberta no navegador não comanda o veículo pela ponte.
+fn session_token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = String::new();
+    for i in 0..2u64 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+        h.write_u64(i ^ std::process::id() as u64);
+        out.push_str(&format!("{:016x}", h.finish()));
+    }
+    out
+}
+
 /// Linhas de log guardadas para mostrar na tela de conexão.
 const LOG_LINES: usize = 400;
 
@@ -52,6 +66,8 @@ pub enum LinkConfig {
     Udp { listen: String },
     /// Conecta por TCP (ex.: SITL em 127.0.0.1:5760).
     Tcp { address: String },
+    /// Reproduz um voo gravado (.tlog); nenhum comando chega a veículo algum.
+    Replay { file: String },
 }
 
 impl LinkConfig {
@@ -75,6 +91,7 @@ impl LinkConfig {
             }
             LinkConfig::Udp { listen } => format!("udpin:{}", host_port(&clean(listen, "endereço UDP")?)?),
             LinkConfig::Tcp { address } => format!("tcpout:{}", host_port(&clean(address, "endereço TCP")?)?),
+            LinkConfig::Replay { file } => format!("reprodução: {file}"),
         })
     }
 }
@@ -126,11 +143,27 @@ struct Running {
     _stdin: Vec<ChildStdin>,
 }
 
-#[derive(Default)]
 pub struct Supervisor {
     running: Mutex<Option<Running>>,
     exit_code: Mutex<Option<i32>>,
     log: Arc<Mutex<VecDeque<String>>>,
+    token: String,
+}
+
+impl Default for Supervisor {
+    fn default() -> Self {
+        Supervisor { running: Mutex::default(), exit_code: Mutex::default(), log: Arc::default(), token: session_token() }
+    }
+}
+
+/// Um voo gravado pela ponte, para a lista "Reproduzir voo".
+#[derive(Serialize, Clone)]
+pub struct FlightLog {
+    pub name: String,
+    pub path: String,
+    pub bytes: u64,
+    /// Segundos desde 1970.
+    pub modified: u64,
 }
 
 impl Supervisor {
@@ -171,7 +204,7 @@ impl Supervisor {
             running: guard.is_some(),
             config: guard.as_ref().map(|r| r.config.clone()),
             exit_code: *self.exit_code.lock().unwrap(),
-            bridge_url: format!("ws://{}", bridge_ws()),
+            bridge_url: format!("ws://{}/?token={}", bridge_ws(), self.token),
             log: self.log.lock().unwrap().iter().cloned().collect(),
         }
     }
@@ -220,9 +253,9 @@ fn strip_ansi(s: &str) -> String {
     out
 }
 
-fn spawn(path: &PathBuf, args: &[String]) -> std::io::Result<Child> {
+fn spawn(path: &PathBuf, args: &[String], envs: &[(&str, &str)]) -> std::io::Result<Child> {
     let mut cmd = Command::new(path);
-    cmd.args(args).arg("--exit-with-parent").env("NO_COLOR", "1").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(args).envs(envs.iter().copied()).arg("--exit-with-parent").env("NO_COLOR", "1").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -254,6 +287,33 @@ fn serial_ports() -> Vec<PortInfo> {
     ports
 }
 
+fn logs_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("logs"))
+}
+
+#[tauri::command]
+fn list_logs(app: tauri::AppHandle) -> Result<Vec<FlightLog>, String> {
+    let dir = logs_dir(&app)?;
+    let Ok(rd) = std::fs::read_dir(&dir) else { return Ok(vec![]) };
+    let mut out: Vec<FlightLog> = rd
+        .filter_map(Result::ok)
+        .filter(|e| e.path().extension().is_some_and(|x| x == "tlog"))
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some(FlightLog {
+                name: e.file_name().to_string_lossy().into_owned(),
+                path: e.path().to_string_lossy().into_owned(),
+                bytes: m.len(),
+                modified: m.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs(),
+            })
+        })
+        // Arquivos de 0 a poucos bytes: conexão sem veículo.
+        .filter(|l| l.bytes > 1024)
+        .collect();
+    out.sort_by_key(|l| std::cmp::Reverse(l.modified));
+    Ok(out)
+}
+
 #[tauri::command]
 fn start_link(app: tauri::AppHandle, sup: State<'_, Supervisor>, config: LinkConfig) -> Result<LinkStatus, String> {
     let url = config.mavlink_url()?;
@@ -265,9 +325,8 @@ fn start_link(app: tauri::AppHandle, sup: State<'_, Supervisor>, config: LinkCon
     let payload = data.join("entrega.json");
 
     Supervisor::push_log(&sup.log, format!("— conectando: {url}"));
-    let bridge_args = vec![
-        "--mavlink".into(),
-        url.clone(),
+    // O token vai por variável de ambiente (ARACUA_TOKEN): não aparece na lista de processos.
+    let mut bridge_args: Vec<String> = vec![
         "--ws".into(),
         bridge_ws(),
         "--map-udp".into(),
@@ -275,7 +334,16 @@ fn start_link(app: tauri::AppHandle, sup: State<'_, Supervisor>, config: LinkCon
         "--payload-file".into(),
         payload.to_string_lossy().into_owned(),
     ];
-    let mut bridge = spawn(&sidecar("aracua-bridge")?, &bridge_args).map_err(|e| format!("falha ao iniciar a ponte: {e}"))?;
+    if let LinkConfig::Replay { file } = &config {
+        let f = PathBuf::from(file);
+        if !f.is_file() {
+            return Err(format!("arquivo não encontrado: {file}"));
+        }
+        bridge_args.extend(["--replay".into(), file.clone()]);
+    } else {
+        bridge_args.extend(["--mavlink".into(), url.clone(), "--log-dir".into(), logs_dir(&app)?.to_string_lossy().into_owned()]);
+    }
+    let mut bridge = spawn(&sidecar("aracua-bridge")?, &bridge_args, &[("ARACUA_TOKEN", &sup.token)]).map_err(|e| format!("falha ao iniciar a ponte: {e}"))?;
     capture(&sup.log, "", bridge.stdout.take().unwrap());
     capture(&sup.log, "", bridge.stderr.take().unwrap());
     let mut stdin = vec![bridge.stdin.take().unwrap()];
@@ -293,7 +361,7 @@ fn start_link(app: tauri::AppHandle, sup: State<'_, Supervisor>, config: LinkCon
         if let (Some(lat), Some(lon)) = (lat, lon) {
             args.extend(["--lat".into(), lat.to_string(), "--lon".into(), lon.to_string()]);
         }
-        match sidecar("fake-vehicle").and_then(|p| spawn(&p, &args).map_err(|e| e.to_string())) {
+        match sidecar("fake-vehicle").and_then(|p| spawn(&p, &args, &[]).map_err(|e| e.to_string())) {
             Ok(mut c) => {
                 capture(&sup.log, "[simulador] ", c.stdout.take().unwrap());
                 capture(&sup.log, "[simulador] ", c.stderr.take().unwrap());
@@ -335,7 +403,7 @@ fn link_status(sup: State<'_, Supervisor>) -> LinkStatus {
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(Supervisor::default())
-        .invoke_handler(tauri::generate_handler![serial_ports, start_link, stop_link, link_status])
+        .invoke_handler(tauri::generate_handler![serial_ports, start_link, stop_link, link_status, list_logs])
         .build(tauri::generate_context!())
         .expect("falha ao iniciar o aplicativo");
     app.run(|handle, event| {
@@ -387,6 +455,17 @@ mod tests {
         assert_eq!(sim_vehicle("vtol"), Ok("vtol"));
         assert!(sim_vehicle("rover").is_err());
         assert!(sim_vehicle("plane --mavlink x").is_err());
+    }
+
+    #[test]
+    fn token_por_execucao() {
+        let a = Supervisor::default();
+        let b = Supervisor::default();
+        assert_eq!(a.token.len(), 32);
+        assert_ne!(a.token, b.token);
+        assert!(a.status().bridge_url.ends_with(&format!("/?token={}", a.token)));
+        let c: LinkConfig = serde_json::from_str(r#"{"kind":"replay","file":"/tmp/x.tlog"}"#).unwrap();
+        assert_eq!(c, LinkConfig::Replay { file: "/tmp/x.tlog".into() });
     }
 
     #[test]

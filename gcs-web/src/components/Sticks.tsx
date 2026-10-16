@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { station, useChannels } from '../lib/store'
 import { MANUAL_MODES, vehicleClass } from '../types'
+import { t as tr } from '../lib/i18n'
 
 type Axis = { x: number; y: number }
 const KEYS = ['w', 'a', 's', 'd', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']
@@ -82,15 +83,15 @@ export function Sticks() {
 
   return (
     <>
-      <label className="tog"><input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> Controle virtual ativo</label>
+      <label className="tog"><input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> {tr('Controle virtual ativo')}</label>
       <div className="hint">
-        {!enabled ? 'Ligue para comandar pelos sticks ou pelo teclado. O rádio controle físico continua tendo prioridade.'
-          : manual ? 'Enviando comandos: W/S sobe e desce, A/D gira, setas movem.'
-          : 'Os comandos só valem armado em Posição, PosHold, Altitude ou Estabilizado.'}
+        {!enabled ? tr('Ligue para comandar pelos sticks ou pelo teclado. O rádio controle físico continua tendo prioridade.')
+          : manual ? tr('Enviando comandos: W/S sobe e desce, A/D gira, setas movem.')
+          : tr('Os comandos só valem armado em Posição, PosHold, Altitude ou Estabilizado.')}
       </div>
       <div className="sticks" aria-disabled={!enabled}>
-        <Stick label="Acel./Guinada" value={left} onMove={setLeft} />
-        <Stick label="Arfagem/Rolagem" value={right} onMove={setRight} />
+        <Stick label={tr('Acel./Guinada')} value={left} onMove={setLeft} />
+        <Stick label={tr('Arfagem/Rolagem')} value={right} onMove={setRight} />
       </div>
     </>
   )

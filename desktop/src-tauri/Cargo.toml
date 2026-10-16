@@ -1,6 +1,6 @@
 [package]
 name = "aracua-desktop"
-version = "0.2.0"
+version = "0.3.0"
 description = "Aracuã-7 — estação de solo para desktop"
 authors = ["Guilherme de Lima Rosman"]
 license = "MIT"

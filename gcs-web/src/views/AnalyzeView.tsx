@@ -5,16 +5,17 @@ import { station, useChannels } from '../lib/store'
 import { clock, fmtDist, fmtTime } from '../lib/format'
 import type { LogLevel, Sample } from '../types'
 import { DeliveryLog } from '../components/Delivery'
+import { t as tr } from '../lib/i18n'
 
 const WINDOW = 300
 type Metric = { k: keyof Omit<Sample, 't'>; name: string; unit: string; lo: number; hi?: number; min?: number; digits: number }
 const METRICS: Metric[] = [
-  { k: 'alt', name: 'Altitude relativa', unit: 'm', lo: 0, min: 20, digits: 1 },
-  { k: 'gs', name: 'Velocidade de solo', unit: 'm/s', lo: 0, min: 10, digits: 1 },
-  { k: 'bat', name: 'Bateria', unit: '%', lo: 0, hi: 100, digits: 0 },
-  { k: 'vib', name: 'Vibração (maior eixo)', unit: 'm/s²', lo: 0, min: 20, digits: 1 },
-  { k: 'link', name: 'Mensagens MAVLink', unit: '/s', lo: 0, min: 40, digits: 0 },
-  { k: 'obs', name: 'Obstáculo mais próximo', unit: 'm', lo: 0, hi: 100, digits: 1 },
+  { k: 'alt', name: tr('Altitude relativa'), unit: 'm', lo: 0, min: 20, digits: 1 },
+  { k: 'gs', name: tr('Velocidade de solo'), unit: 'm/s', lo: 0, min: 10, digits: 1 },
+  { k: 'bat', name: tr('Bateria'), unit: '%', lo: 0, hi: 100, digits: 0 },
+  { k: 'vib', name: tr('Vibração (maior eixo)'), unit: 'm/s²', lo: 0, min: 20, digits: 1 },
+  { k: 'link', name: tr('Mensagens MAVLink'), unit: '/s', lo: 0, min: 40, digits: 0 },
+  { k: 'obs', name: tr('Obstáculo mais próximo'), unit: 'm', lo: 0, hi: 100, digits: 1 },
 ]
 
 function niceMax(v: number) {
@@ -29,7 +30,7 @@ function sampleAt(t: number) {
   }
   return bd < 1.5 ? best : null
 }
-const ago = (s: number) => (s < 1 ? 'agora' : s < 60 ? `há ${Math.round(s)} s` : `há ${Math.floor(s / 60)} min ${Math.round(s % 60)} s`)
+const ago = (s: number) => (s < 1 ? tr('agora') : s < 60 ? tr('há {v0} s', { v0: Math.round(s) }) : tr('há {v0} min {v1} s', { v0: Math.floor(s / 60), v1: Math.round(s % 60) }))
 
 function Chart({ m, hover, setHover }: { m: Metric; hover: number | null; setHover: (t: number | null) => void }) {
   useChannels('telemetry')
@@ -86,7 +87,7 @@ function Chart({ m, hover, setHover }: { m: Metric; hover: number | null; setHov
   return (
     <div className="chart">
       <header><span>{m.name}</span><b>{show ? fmt(show[m.k]) : '—'}<small>{m.unit}{hs ? ` · ${ago(now - hs.t)}` : ''}</small></b></header>
-      <canvas ref={cv} aria-label={`Gráfico de ${m.name}`}
+      <canvas ref={cv} aria-label={tr('Gráfico de {name}', { name: m.name })}
         onPointerMove={(e) => {
           const r = cv.current!.getBoundingClientRect(), x0 = 40, x1 = r.width - 10
           const x = Math.max(x0, Math.min(x1, e.clientX - r.left))
@@ -108,7 +109,7 @@ function Charts() {
       ...h.map((s) => [(s.t - t0).toFixed(1), s.alt.toFixed(2), s.gs.toFixed(2), s.bat, s.vib.toFixed(2), s.link.toFixed(0), s.obs.toFixed(1)].join(','))].join('\n')
     try {
       await navigator.clipboard.writeText(txt)
-      station.addLog('ok', `CSV copiado (${h.length} amostras)`)
+      station.addLog('ok', tr('CSV copiado ({n} amostras)', { n: h.length }))
       setCsv(null)
     } catch {
       setCsv(txt)
@@ -116,10 +117,10 @@ function Charts() {
   }
   return (
     <>
-      <h2>Gráficos de voo</h2>
-      <p className="desc">Últimos 5 minutos, amostrados a 2 Hz. Passe o cursor sobre um gráfico para ler o mesmo instante em todos.</p>
-      <div className="brow"><button className="btn" onClick={copy}>Copiar CSV</button></div>
-      {csv && <textarea className="json" readOnly value={csv} autoFocus onFocus={(e) => e.target.select()} aria-label="CSV" />}
+      <h2>{tr('Gráficos de voo')}</h2>
+      <p className="desc">{tr('Últimos 5 minutos, amostrados a 2 Hz. Passe o cursor sobre um gráfico para ler o mesmo instante em todos.')}</p>
+      <div className="brow"><button className="btn" onClick={copy}>{tr('Copiar CSV')}</button></div>
+      {csv && <textarea className="json" readOnly value={csv} autoFocus onFocus={(e) => e.target.select()} aria-label={tr('CSV')} />}
       <div className="charts">{METRICS.map((m) => <Chart key={m.k} m={m} hover={hover} setHover={setHover} />)}</div>
     </>
   )
@@ -131,14 +132,14 @@ function Inspector() {
   const rows = Object.entries(st).sort((a, b) => b[1].hz - a[1].hz)
   return (
     <>
-      <h2>Inspetor MAVLink</h2>
-      <p className="desc">Mensagens que a ponte recebe do veículo, com taxa atual e total.</p>
+      <h2>{tr('Inspetor MAVLink')}</h2>
+      <p className="desc">{tr('Mensagens que a ponte recebe do veículo, com taxa atual e total.')}</p>
       <div className="tblw">
         <table className="mav">
-          <thead><tr><th>Mensagem</th><th>Taxa</th><th>Recebidas</th></tr></thead>
+          <thead><tr><th>{tr('Mensagem')}</th><th>{tr('Taxa')}</th><th>{tr('Recebidas')}</th></tr></thead>
           <tbody>
             {rows.map(([k, v]) => <tr key={k}><td>{k}</td><td>{v.hz.toFixed(1)} Hz</td><td>{v.count.toLocaleString('pt-BR')}</td></tr>)}
-            {!rows.length && <tr><td colSpan={3} className="empty">Nenhuma mensagem recebida ainda.</td></tr>}
+            {!rows.length && <tr><td colSpan={3} className="empty">{tr('Nenhuma mensagem recebida ainda.')}</td></tr>}
           </tbody>
         </table>
       </div>
@@ -151,15 +152,15 @@ function Events() {
   useChannels('log')
   const [f, setF] = useState<'all' | LogLevel>('all')
   const list = station.log.filter((e) => f === 'all' || e.level === f).slice(-400).reverse()
-  const opts: ['all' | LogLevel, string][] = [['all', 'Todos'], ['warn', 'Avisos'], ['error', 'Erros'], ['cmd', 'Comandos']]
+  const opts: ['all' | LogLevel, string][] = [['all', tr('Todos')], ['warn', tr('Avisos')], ['error', tr('Erros')], ['cmd', tr('Comandos')]]
   return (
     <>
-      <h2>Log de eventos</h2>
-      <p className="desc">Mensagens do veículo (STATUSTEXT), respostas a comandos e eventos da estação.</p>
+      <h2>{tr('Log de eventos')}</h2>
+      <p className="desc">{tr('Mensagens do veículo (STATUSTEXT), respostas a comandos e eventos da estação.')}</p>
       <div className="brow">{opts.map(([k, l]) => <button key={k} className={`btn ${f === k ? 'on' : ''}`} onClick={() => setF(k)}>{l}</button>)}</div>
       <div className="evlist">
         {list.map((e, i) => <div key={i}><span className="t">{clock(e.t)}</span><span className={e.level}>{ICON[e.level]}</span><span className={e.level}>{e.text}</span></div>)}
-        {!list.length && <div><span /><span /><span className="t">Nada neste filtro.</span></div>}
+        {!list.length && <div><span /><span /><span className="t">{tr('Nada neste filtro.')}</span></div>}
       </div>
     </>
   )
@@ -173,37 +174,37 @@ function Summary() {
   )
   return (
     <>
-      <h2>Resumo do voo</h2>
-      <p className="desc">Totais desde que esta página foi aberta.</p>
+      <h2>{tr('Resumo do voo')}</h2>
+      <p className="desc">{tr('Totais desde que esta página foi aberta.')}</p>
       <div className="sumgrid">
-        {card('Tempo de voo', fmtTime(s.flightS))}
-        {card('Distância percorrida', fmtDist(s.distance))}
-        {card('Altitude máxima', s.maxAlt.toFixed(1), 'm')}
-        {card('Velocidade máxima', (s.maxGs * 3.6).toFixed(1), 'km/h', `${s.maxGs.toFixed(1)} m/s`)}
-        {card('Bateria usada', t ? String(t.battery.consumed_mah) : '—', 'mAh', t ? `restam ${t.battery.remaining} %` : '')}
-        {card('Fotos pedidas', String(s.photos))}
-        {card('Lançamentos (entrega)', String(station.payload?.total ?? '—'), '', station.payload ? `${station.payload.loaded} carregados agora` : '')}
-        {card('Área mapeada (LiDAR)', ((station.groundCells * 4 * station.voxelM ** 2) / 10000).toFixed(2), 'ha')}
-        {card('Voxels no mapa 3D', station.vox.e.length.toLocaleString('pt-BR'))}
+        {card(tr('Tempo de voo'), fmtTime(s.flightS))}
+        {card(tr('Distância percorrida'), fmtDist(s.distance))}
+        {card(tr('Altitude máxima'), s.maxAlt.toFixed(1), 'm')}
+        {card(tr('Velocidade máxima'), (s.maxGs * 3.6).toFixed(1), 'km/h', `${s.maxGs.toFixed(1)} m/s`)}
+        {card(tr('Bateria usada'), t ? String(t.battery.consumed_mah) : '—', 'mAh', t ? tr('restam {n} %', { n: t.battery.remaining }) : '')}
+        {card(tr('Fotos pedidas'), String(s.photos))}
+        {card(tr('Lançamentos (entrega)'), String(station.payload?.total ?? '—'), '', station.payload ? tr('{n} carregados agora', { n: station.payload.loaded }) : '')}
+        {card(tr('Área mapeada (LiDAR)'), ((station.groundCells * 4 * station.voxelM ** 2) / 10000).toFixed(2), 'ha')}
+        {card(tr('Voxels no mapa 3D'), station.vox.e.length.toLocaleString('pt-BR'))}
       </div>
     </>
   )
 }
 
 const TABS = [
-  { id: 'graf', label: 'Gráficos de voo' },
-  { id: 'mav', label: 'Inspetor MAVLink' },
-  { id: 'ev', label: 'Log de eventos' },
-  { id: 'ent', label: 'Lançamentos' },
-  { id: 'res', label: 'Resumo do voo' },
+  { id: 'graf', label: tr('Gráficos de voo') },
+  { id: 'mav', label: tr('Inspetor MAVLink') },
+  { id: 'ev', label: tr('Log de eventos') },
+  { id: 'ent', label: tr('Lançamentos') },
+  { id: 'res', label: tr('Resumo do voo') },
 ] as const
 
 export function AnalyzeView() {
   const [tab, setTab] = useState<(typeof TABS)[number]['id']>('graf')
   return (
-    <section className="page" aria-label="Análise">
+    <section className="page" aria-label={tr('Análise')}>
       <nav className="pnav">
-        <div className="ph">Análise</div>
+        <div className="ph">{tr('Análise')}</div>
         {TABS.map((x) => <button key={x.id} className={tab === x.id ? 'on' : ''} onClick={() => setTab(x.id)}>{x.label}</button>)}
       </nav>
       <div className="pbody">

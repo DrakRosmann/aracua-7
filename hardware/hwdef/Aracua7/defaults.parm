@@ -1,0 +1,43 @@
+# Parâmetros padrão do Aracuã-7
+# Quadricóptero X
+FRAME_CLASS 1
+FRAME_TYPE 1
+# DShot600 bidirecional nas saídas 1-4
+MOT_PWM_TYPE 6
+SERVO_BLH_BDMASK 15
+SERVO_BLH_POLES 14
+# filtro harmônico pelo RPM dos motores
+INS_HNTCH_ENABLE 1
+INS_HNTCH_MODE 3
+# rumo pelo GPS duplo (moving baseline) quando os dois F9P estiverem ligados
+GPS1_TYPE 17
+GPS2_TYPE 18
+# anticolisão por OBSTACLE_DISTANCE vindo do computador de bordo
+PRX1_TYPE 2
+AVOID_ENABLE 7
+# LED WS2812 na saída 9
+SERVO9_FUNCTION 120
+NTF_LED_TYPES 123
+# ---------- Sistema de entrega ----------
+# Servos dos compartimentos: saídas 5-8, 10 e 11 com função 0 (Disabled),
+# comandadas pela estação com MAV_CMD_DO_SET_SERVO
+SERVO5_FUNCTION 0
+SERVO6_FUNCTION 0
+SERVO7_FUNCTION 0
+SERVO8_FUNCTION 0
+SERVO10_FUNCTION 0
+SERVO11_FUNCTION 0
+# o TIM4 não tem motor, então as saídas 5-8 ficam em PWM de 50 Hz mesmo com DShot nas 1-4
+# solenoides: RELAY3 e RELAY4 (instâncias 2 e 3 no MAV_CMD_DO_SET_RELAY)
+RELAY3_FUNCTION 1
+RELAY3_PIN 83
+RELAY3_DEFAULT 0
+RELAY4_FUNCTION 1
+RELAY4_PIN 84
+RELAY4_DEFAULT 0
+# buck dos servos sempre ligado ao iniciar
+RELAY5_FUNCTION 1
+RELAY5_PIN 85
+RELAY5_DEFAULT 1
+# Lua para entrega.lua (estado das chaves)
+SCR_ENABLE 1

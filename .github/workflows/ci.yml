@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ponte:
+    name: Ponte (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bridge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bridge
+      - run: sudo apt-get update && sudo apt-get install -y libudev-dev
+      - run: cargo test
+      - run: cargo clippy --all-targets
+
+  interface:
+    name: Interface (TypeScript)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gcs-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: gcs-web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+
+  bordo:
+    name: Bordo (ROS 2 Jazzy)
+    runs-on: ubuntu-latest
+    container: ros:jazzy-ros-base
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y ros-jazzy-geographic-msgs
+      - name: Compilar e testar
+        shell: bash
+        working-directory: ros2_ws
+        run: |
+          source /opt/ros/jazzy/setup.bash
+          colcon build --event-handlers console_cohesion+
+          colcon test --event-handlers console_cohesion+
+          colcon test-result --verbose

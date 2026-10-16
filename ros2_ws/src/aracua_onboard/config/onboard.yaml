@@ -1,0 +1,58 @@
+# Parâmetros dos nós de bordo do Aracuã-7.
+
+voxel_mapper:
+  ros__parameters:
+    cloud_topic: /lidar/points
+    # true se a nuvem já vem registrada no mapa (ex.: /cloud_registered do FAST-LIO)
+    cloud_in_map_frame: false
+    pose_topic: /mavros/local_position/pose
+    map_frame: map
+    voxel_size: 1.0
+    ground_below_m: 0.4
+    max_voxels: 2000000
+    delta_rate_hz: 5.0
+
+obstacle_sectors:
+  ros__parameters:
+    cloud_topic: /lidar/points
+    cloud_in_map_frame: false
+    pose_topic: /mavros/local_position/pose
+    mavros_topic: /mavros/obstacle/send
+    body_frame: base_link
+    sectors: 72
+    min_range_m: 0.6
+    max_range_m: 90.0
+    band_m: 3.0
+    mount_yaw_deg: 0.0
+    rate_hz: 10.0
+
+map_link:
+  ros__parameters:
+    # IP do computador da estação de solo (onde roda o aracua-bridge)
+    ground_host: 127.0.0.1
+    ground_port: 14600
+    voxel_size: 1.0
+    # Limite de banda (mapa + setores); ajuste ao seu rádio (telemetria 915 MHz: 50–150)
+    max_kbps: 400.0
+    # Tamanho máximo de cada datagrama UDP; 1400 não fragmenta em Ethernet/Wi-Fi
+    max_datagram_bytes: 1400
+    fix_topic: /mavros/global_position/global
+    pose_topic: /mavros/local_position/pose
+    # Sem gp_origin depois deste tempo, a origem é estimada pelo GPS e pela posição local
+    origin_timeout_s: 10.0
+    origin_topic: /mavros/global_position/gp_origin
+    # Origem fixa opcional, usada até o MAVROS publicar a do EKF (0, 0 = desligado)
+    origin_lat: 0.0
+    origin_lon: 0.0
+    origin_alt: 0.0
+
+sim_lidar:
+  ros__parameters:
+    pose_topic: /mavros/local_position/pose
+    cloud_topic: /lidar/points
+    frame_id: base_link
+    range_m: 90.0
+    azimuth_step_deg: 2.0
+    channels_deg: [-30.0, -22.0, -15.0, -9.0, -4.0, 0.0, 4.0, 10.0]
+    noise_m: 0.03
+    rate_hz: 10.0

@@ -1,0 +1,40 @@
+ref,qtd,peca,lcsc,origem
+U1,1,STM32H743ZIT6,C114408,easyeda
+U2,1,ICM-42688-P,C1850418,easyeda
+U3,1,BMI270,C2836813,easyeda
+U4,1,DPS310XTSA1,C3232509,easyeda
+U5,1,INA238AIDGSR,C2868250,easyeda
+U6,1,LAN8742A-CZ-TR,C621424,easyeda
+T1,1,H1102NLT,C18584,easyeda
+U7 U8,2,TCAN1044VDRQ1,C1852061,easyeda
+U9,1,TPS54360BDDAR,C524806,easyeda
+U10,1,TPS54560BDDAR,C1850354,easyeda
+U11,1,TLV75733PDBVR,C485517,easyeda
+U12,1,TPS7A2033PDBVR,C2862740,easyeda
+U13,1,SN74AHCT1G125DBVR,C7484,easyeda
+U14,1,USBLC6-2SC6,C7519,easyeda
+D1,1,B360A-13-F,C94193,easyeda
+D2,1,B560C-13-F,C85100,easyeda
+D3,1,SMCJ30A (Littelfuse),C224048,easyeda
+D4,1,BZT52C12,C43491,easyeda
+D5,1,1N4148WS,C2128,easyeda
+D6,1,B340A-13-F,C85098,easyeda
+Q1,1,AOD4185,C77993,easyeda
+Q2,1,2N7002,C8545,easyeda
+Q3 Q4,2,AO3400A,C20917,easyeda
+BZ1,1,MLT-8530,C94599,easyeda
+LED1,1,WS2812B-2020,C965555,easyeda
+J1,1,USB4105-GF-A,C3020560,easyeda
+J2,1,DM3AT-SF-PEJM5,C114218,easyeda
+J15,1,XT30PW-M,C431092,easyeda
+J3-J6,4,SM06B-GHS-TB,C133065,kicad:Connector_JST:JST_GH_SM06B-GHS-TB_1x06-1MP_P1.25mm_Horizontal
+J7,1,SM10B-GHS-TB,,kicad:Connector_JST:JST_GH_SM10B-GHS-TB_1x10-1MP_P1.25mm_Horizontal
+J8-J11,4,SM04B-GHS-TB,C189895,kicad:Connector_JST:JST_GH_SM04B-GHS-TB_1x04-1MP_P1.25mm_Horizontal
+J12,1,SM06B-SRSS-TB,C160405,kicad:Connector_JST:JST_SH_SM06B-SRSS-TB_1x06-1MP_P1.00mm_Horizontal
+J13,1,SM08B-SRSS-TB,C160407,kicad:Connector_JST:JST_SH_SM08B-SRSS-TB_1x08-1MP_P1.00mm_Horizontal
+J14,1,Molex 43045-0412,,kicad:Connector_Molex:Molex_Micro-Fit_3.0_43045-0412_2x02_P3.00mm_Vertical
+Y1,1,Cristal 16 MHz 3225,,kicad:Crystal:Crystal_SMD_3225-4Pin_3.2x2.5mm
+Y2,1,Cristal 25 MHz 3225,,kicad:Crystal:Crystal_SMD_3225-4Pin_3.2x2.5mm
+RS1,1,Shunt 0.25 mOhm 3920,,kicad:Resistor_SMD (escolher pelo datasheet do shunt)
+F1,1,Fusivel 3 A 1206,,kicad:Fuse:Fuse_1206_3216Metric
+C/R/L/FB,,passivos genericos,,kicad:Capacitor_SMD / Resistor_SMD / Inductor_SMD / Inductor_SMD (ferrite 0603)

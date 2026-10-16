@@ -1,0 +1,10 @@
+bridge/target/
+gcs-web/node_modules/
+gcs-web/dist/
+ros2_ws/build/
+ros2_ws/install/
+ros2_ws/log/
+
+# Estado gravado pela ponte em tempo de execução (contador e histórico de lançamentos)
+entrega.json
+*.json.tmp

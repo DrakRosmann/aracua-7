@@ -5,11 +5,12 @@
 
 mod commands;
 mod link;
+mod maintenance;
 mod mission;
 mod payload;
 mod state;
 
-use aracua_bridge::{apm::MavMessage, mapframe, now_ms};
+use aracua_bridge::{apm::MavMessage, fence, mapframe, now_ms};
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -53,6 +54,9 @@ struct Args {
     /// Arquivo com a configuração dos compartimentos de entrega, o contador e o histórico
     #[arg(long, default_value = "entrega.json")]
     payload_file: PathBuf,
+    /// Registro de manutenção (horas de voo, baterias, tarefas)
+    #[arg(long, default_value = "manutencao.json")]
+    maintenance_file: PathBuf,
     /// Sai quando a entrada padrão fechar (usado pelo app desktop)
     #[arg(long)]
     exit_with_parent: bool,
@@ -74,7 +78,13 @@ pub struct Shared {
     pub downloader: Mutex<mission::Downloader>,
     /// O que está no veículo, pelo último download ou envio.
     pub vehicle_mission: Mutex<Option<mission::VehicleMission>>,
+    /// Geocerca: envio, download, a que está no veículo e a que está sendo enviada.
+    pub fence_up: Mutex<mission::Uploader>,
+    pub fence_down: Mutex<mission::Downloader>,
+    pub vehicle_fence: Mutex<Option<fence::Fence>>,
+    pub fence_pending: Mutex<Option<fence::Fence>>,
     pub payload: Mutex<payload::Payload>,
+    pub maintenance: Mutex<maintenance::Maintenance>,
     pub tx: broadcast::Sender<Out>,
     pub clients: AtomicUsize,
     map_history: Mutex<(Vec<Arc<Vec<u8>>>, usize)>,
@@ -100,6 +110,10 @@ impl Shared {
             alt_rel: s.t.alt_rel,
             groundspeed: s.t.groundspeed,
         }
+    }
+    pub fn emit_maintenance(&self) {
+        let v = self.maintenance.lock().unwrap().view();
+        self.emit(v);
     }
     /// Estado da reprodução de voo gravado, se houver.
     pub fn emit_replay(&self) {
@@ -140,11 +154,49 @@ impl Shared {
                 Ok(items) => {
                     tracing::info!("missão lida do veículo: {} itens", items.len());
                     self.set_vehicle_mission(&items);
+                    // Em seguida a geocerca, uma transferência de cada vez.
+                    if self.vehicle_fence.lock().unwrap().is_none() && !self.link.is_replay() {
+                        self.fence_down.lock().unwrap().start(&self.link);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("download da missão: {e}");
                     self.emit(json!({"type":"error","message":format!("download da missão: {e}")}));
                 }
+            }
+        }
+    }
+    fn fence_view(&self) -> Option<serde_json::Value> {
+        let f = self.vehicle_fence.lock().unwrap().clone()?;
+        let mut v = serde_json::to_value(&f).ok()?;
+        v["type"] = json!("vehicle_fence");
+        Some(v)
+    }
+    fn set_vehicle_fence(&self, f: fence::Fence) {
+        *self.vehicle_fence.lock().unwrap() = Some(f);
+        if let Some(v) = self.fence_view() {
+            self.emit(v);
+        }
+    }
+    fn on_fence_upload(&self, out: mission::Outcome) {
+        if let mission::Outcome::Done { ok, result, count, .. } = out {
+            tracing::info!("envio da geocerca: {result}");
+            self.emit(json!({"type":"fence_upload","ok":ok,"result":result,"count":count}));
+            let sent = self.fence_pending.lock().unwrap().take();
+            if let (true, Some(f)) = (ok, sent) {
+                self.set_vehicle_fence(f);
+            }
+        }
+    }
+    fn on_fence_download(&self, out: mission::Download) {
+        if let mission::Download::Done(r) = out {
+            match r {
+                Ok(items) => {
+                    tracing::info!("geocerca lida do veículo: {} itens", items.len());
+                    self.set_vehicle_fence(fence::Fence::parse(&items));
+                }
+                // Veículos sem cerca por polígono (ou firmware antigo) não respondem: não é erro grave.
+                Err(e) => tracing::warn!("download da geocerca: {e}"),
             }
         }
     }
@@ -206,6 +258,10 @@ fn receive_loop(shared: Arc<Shared>) {
         shared.on_upload(up);
         let down = shared.downloader.lock().unwrap().handle(&shared.link, &msg);
         shared.on_download(down);
+        let up = shared.fence_up.lock().unwrap().handle(&shared.link, &msg);
+        shared.on_fence_upload(up);
+        let down = shared.fence_down.lock().unwrap().handle(&shared.link, &msg);
+        shared.on_fence_download(down);
     }
 }
 
@@ -270,6 +326,10 @@ async fn periodic(shared: Arc<Shared>) {
         shared.on_upload(up);
         let down = shared.downloader.lock().unwrap().tick(&shared.link);
         shared.on_download(down);
+        let up = shared.fence_up.lock().unwrap().tick(&shared.link);
+        shared.on_fence_upload(up);
+        let down = shared.fence_down.lock().unwrap().tick(&shared.link);
+        shared.on_fence_download(down);
         // Sistema de entrega: 10 Hz durante a contagem, 2 Hz no resto do tempo.
         let counting = {
             let mut p = shared.payload.lock().unwrap();
@@ -286,6 +346,22 @@ async fn periodic(shared: Arc<Shared>) {
         };
         if counting || tick.is_multiple_of(5) {
             shared.emit_payload();
+        }
+        // Manutenção: conta o voo (não na reprodução, que é um voo já contado).
+        if !shared.link.is_replay() {
+            let wing = matches!(snap.vehicle_class.as_str(), "plane" | "vtol");
+            let airborne = if snap.vehicle_class == "rover" { snap.groundspeed > 0.5 } else { snap.alt_rel > 1.0 || (wing && snap.groundspeed > 8.0) };
+            let sample = maintenance::Sample {
+                connected: snap.connected, armed: snap.armed, airborne, alt_rel: snap.alt_rel as f64,
+                lat: snap.lat, lon: snap.lon, vehicle: snap.vehicle_class.clone(),
+            };
+            let done = shared.maintenance.lock().unwrap().step(&sample, 0.1, now_ms());
+            if let Some(f) = done {
+                tracing::info!("voo nº {} registrado: {:.0} s, {:.0} m", f.n, f.duration_s, f.distance_m);
+                shared.emit_maintenance();
+            } else if tick.is_multiple_of(100) {
+                shared.emit_maintenance();
+            }
         }
         let mut v = serde_json::to_value(&snap).unwrap_or_default();
         v["type"] = json!("telemetry");
@@ -369,8 +445,14 @@ async fn client(shared: Arc<Shared>, stream: tokio::net::TcpStream, mavlink_addr
     }).to_string())).await?;
     let pv = shared.payload.lock().unwrap().view(now_ms());
     sink.send(WsMsg::text(pv.to_string())).await?;
+    let mv = shared.maintenance.lock().unwrap().view();
+    sink.send(WsMsg::text(mv.to_string())).await?;
     let mv = shared.mission_view();
     if let Some(v) = mv {
+        sink.send(WsMsg::text(v.to_string())).await?;
+    }
+    let fv = shared.fence_view();
+    if let Some(v) = fv {
         sink.send(WsMsg::text(v.to_string())).await?;
     }
     shared.clients.fetch_add(1, Ordering::SeqCst);
@@ -470,7 +552,12 @@ async fn main() -> anyhow::Result<()> {
         mission: Mutex::new(mission::Uploader::default()),
         downloader: Mutex::new(mission::Downloader::default()),
         vehicle_mission: Mutex::new(None),
+        fence_up: Mutex::new(mission::Uploader::new(aracua_bridge::apm::MavMissionType::MAV_MISSION_TYPE_FENCE)),
+        fence_down: Mutex::new(mission::Downloader::new(aracua_bridge::apm::MavMissionType::MAV_MISSION_TYPE_FENCE)),
+        vehicle_fence: Mutex::new(None),
+        fence_pending: Mutex::new(None),
         payload: Mutex::new(payload::Payload::load(Some(args.payload_file.clone()))),
+        maintenance: Mutex::new(maintenance::Maintenance::load(Some(args.maintenance_file.clone()))),
         tx,
         clients: AtomicUsize::new(0),
         map_history: Mutex::new((Vec::new(), 0)),

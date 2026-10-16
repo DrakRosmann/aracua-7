@@ -20,7 +20,7 @@ async function pilha(firmware, model, parm) {
   const sitl = run(join(SITL, firmware), ['--model', model, '--speedup', SPEEDUP, '--home', `${HOME.lat},${HOME.lon},584,353`, '--defaults', join(SITL, parm), `-I${i}`], { cwd: dir })
   await sleep(1500)
   const ws = 29700 + i
-  const ponte = run(bridgeBin, ['--mavlink', `tcpout:127.0.0.1:${5760 + 10 * i}`, '--ws', `127.0.0.1:${ws}`, '--map-udp', `127.0.0.1:${29800 + i}`, '--payload-file', join(dir, 'entrega.json'), '--log-dir', join(dir, 'logs')])
+  const ponte = run(bridgeBin, ['--mavlink', `tcpout:127.0.0.1:${5760 + 10 * i}`, '--ws', `127.0.0.1:${ws}`, '--map-udp', `127.0.0.1:${29800 + i}`, '--payload-file', join(dir, 'entrega.json'), '--maintenance-file', join(dir, 'entrega.json') + '.manut', '--log-dir', join(dir, 'logs')])
   await sleep(800)
   const c = await new Ponte(`ws://127.0.0.1:${ws}`).connect()
   return { c, dir, stop() { c.close(); ponte.kill(); sitl.kill() }, sitl, ponte }

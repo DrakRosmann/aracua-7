@@ -1,5 +1,6 @@
 //! Núcleo compartilhado entre a ponte e o veículo simulado.
 
+pub mod fence;
 pub mod mapframe;
 pub mod modes;
 

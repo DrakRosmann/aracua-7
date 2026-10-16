@@ -28,6 +28,8 @@ export const Icon = {
   grid: () => <S><rect x="3.5" y="3.5" width="17" height="17" rx="1" /><path d="M7 7h10v3.3H7v3.4h10V17H7" /></S>,
   fit: () => <S><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></S>,
   upload: () => <S><path d="M12 16V4M7 9l5-5 5 5" /><path d="M4 16v4h16v-4" /></S>,
+  fence: () => <S><path d="M4 20V8l2-3 2 3v12M10 20V8l2-3 2 3v12M16 20V8l2-3 2 3v12M3 11h18M3 16h18" /></S>,
+  cube: () => <S><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z" /><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5" /></S>,
   download: () => <S><path d="M12 4v12M7 11l5 5 5-5" /><path d="M4 16v4h16v-4" /></S>,
   values: () => <S><circle cx="12" cy="12" r="3" /><path d="M12 3v3M12 18v3M3 12h3M18 12h3" /></S>,
   camera: () => <S><rect x="3" y="7" width="13" height="11" rx="2" /><path d="M16 11l5-3v9l-5-3" /></S>,

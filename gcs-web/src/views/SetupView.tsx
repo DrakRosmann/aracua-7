@@ -7,6 +7,7 @@ import { clamp } from '../lib/format'
 import { DeliverySetup } from '../components/Delivery'
 import { Calibration } from '../components/Calibration'
 import { OfflineMap } from '../components/OfflineMap'
+import { MaintenanceView } from '../components/Maintenance'
 import { flightCards, rtlAltParam, safetyCards, type PCard, type PField } from '../lib/params'
 import { t, tk } from '../lib/i18n'
 import { classLabel, vehicleClass } from '../types'
@@ -185,6 +186,7 @@ const PAGES = [
   { id: 'voo', label: tk('Parâmetros de voo') },
   { id: 'cal', label: tk('Calibração') },
   { id: 'entrega', label: tk('Entrega') },
+  { id: 'manut', label: tk('Manutenção') },
   { id: 'estacao', label: tk('Estação') },
 ] as const
 
@@ -217,6 +219,7 @@ export function SetupView() {
         )}
         {page === 'cal' && <Calibration />}
         {page === 'entrega' && <DeliverySetup />}
+        {page === 'manut' && <MaintenanceView />}
         {page === 'estacao' && <StationSettings />}
       </div>
     </section>

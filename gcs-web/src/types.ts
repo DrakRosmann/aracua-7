@@ -1,6 +1,7 @@
 // Tipos do protocolo com a ponte (ver docs/protocolo.md).
 
 import { t, tk } from './lib/i18n'
+import type { FenceData } from './lib/fence'
 
 export interface Telemetry {
   type: 'telemetry'
@@ -67,6 +68,31 @@ export type ServerMessage =
   | VehicleMission
   | ReplayState
   | CalibEvent
+  | ({ type: 'vehicle_fence' } & FenceData)
+  | { type: 'fence_upload'; ok: boolean; result: string; count: number }
+  | MaintenanceState
+
+export interface MaintBattery { id: number; name: string; cycles: number; flight_s: number; max_cycles: number; retired: boolean }
+export interface MaintTask {
+  id: number; name: string; every_h: number; every_flights: number
+  since_h: number; since_flights: number; used: number; due: boolean; done_at: number | null
+}
+export interface MaintFlight { n: number; start: number; duration_s: number; max_alt: number; distance_m: number; battery: number | null; vehicle: string }
+
+/** Registro de manutenção guardado pela ponte. */
+export interface MaintenanceState {
+  type: 'maintenance'
+  airframe: string
+  flight_s: number
+  flights: number
+  arm_cycles: number
+  batteries: MaintBattery[]
+  active_battery: number | null
+  tasks: MaintTask[]
+  history: MaintFlight[]
+  notes: { t: number; text: string }[]
+  flying_s: number | null
+}
 
 /** Missão que está no veículo (lida dele ou acabada de enviar). */
 export interface VehicleMission {
@@ -170,6 +196,12 @@ export type ClientCommand =
   | { cmd: 'calibrate'; kind: 'accel' | 'level' | 'gyro' | 'compass' | 'compass_accept' | 'compass_cancel' }
   | { cmd: 'accel_pos'; position: number }
   | { cmd: 'reboot' }
+  | { cmd: 'fence_upload'; fence: FenceData; enable?: boolean }
+  | { cmd: 'fence_download' }
+  | { cmd: 'maintenance_get' }
+  | { cmd: 'maintenance_config'; airframe: string; batteries: Omit<MaintBattery, 'flight_s'>[]; active_battery: number | null; tasks: Pick<MaintTask, 'id' | 'name' | 'every_h' | 'every_flights'>[] }
+  | { cmd: 'maintenance_done'; task: number; note?: string }
+  | { cmd: 'maintenance_note'; text: string }
   | { cmd: 'manual'; x: number; y: number; z: number; r: number }
   | { cmd: 'param_get'; id: string }
   | { cmd: 'param_set'; id: string; value: number }

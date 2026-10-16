@@ -17,7 +17,7 @@ async function pilha({ vehicle = 'copter', bridgeArgs = [], sim = true } = {}) {
   const dir = tempDir('teste')
   const ponte = run(bin('aracua-bridge'), [
     '--ws', `127.0.0.1:${p.ws}`, '--mavlink', `udpin:127.0.0.1:${p.mav}`, '--map-udp', `127.0.0.1:${p.map}`,
-    '--payload-file', join(dir, 'entrega.json'), '--log-dir', join(dir, 'logs'), ...bridgeArgs,
+    '--payload-file', join(dir, 'entrega.json'), '--maintenance-file', join(dir, 'manutencao.json'), '--log-dir', join(dir, 'logs'), ...bridgeArgs,
   ])
   await sleep(400)
   const veiculo = sim ? run(bin('fake-vehicle'), ['--vehicle', vehicle, '--mavlink', `udpout:127.0.0.1:${p.mav}`, '--map', `127.0.0.1:${p.map}`]) : null
@@ -65,7 +65,7 @@ const falhas = await suite('Ponte + simulador', [
 
   ['token: escutando na rede, a ponte gera um e recusa quem não tem', async () => {
     const p = ++port
-    const ponte = run(bin('aracua-bridge'), ['--ws', `0.0.0.0:${p}`, '--mavlink', `udpin:127.0.0.1:${++port}`, '--map-udp', `127.0.0.1:${++port}`, '--no-log', '--payload-file', join(tempDir('t'), 'e.json')])
+    const ponte = run(bin('aracua-bridge'), ['--ws', `0.0.0.0:${p}`, '--mavlink', `udpin:127.0.0.1:${++port}`, '--map-udp', `127.0.0.1:${++port}`, '--no-log', '--payload-file', join(tempDir('t'), 'e.json'), '--maintenance-file', join(tempDir('t'), 'e.json') + '.manut'])
     try {
       await sleep(600)
       const linha = ponte.log.find((l) => l.includes('?token='))
@@ -105,7 +105,7 @@ const falhas = await suite('Ponte + simulador', [
       s.ponte.kill()
       await sleep(500)
       // Ponte nova, mesmo veículo: tem de baixar sozinha.
-      const nova = run(bin('aracua-bridge'), ['--ws', `127.0.0.1:${s.ws}`, '--mavlink', `udpin:127.0.0.1:${s.mav}`, '--map-udp', `127.0.0.1:${s.map}`, '--no-log', '--payload-file', join(s.dir, 'entrega.json')])
+      const nova = run(bin('aracua-bridge'), ['--ws', `127.0.0.1:${s.ws}`, '--mavlink', `udpin:127.0.0.1:${s.mav}`, '--map-udp', `127.0.0.1:${s.map}`, '--no-log', '--payload-file', join(s.dir, 'entrega.json'), '--maintenance-file', join(s.dir, 'entrega.json') + '.manut'])
       s.ponte = nova
       await sleep(500)
       const c2 = await s.cliente()
@@ -172,7 +172,7 @@ const falhas = await suite('Ponte + simulador', [
       const logs = readdirSync(join(s.dir, 'logs')).filter((f) => f.endsWith('.tlog'))
       if (logs.length !== 1) throw new Error(`${logs.length} arquivos .tlog`)
       const rp = ++port
-      replay = run(bin('aracua-bridge'), ['--ws', `127.0.0.1:${rp}`, '--replay', join(s.dir, 'logs', logs[0]), '--replay-speed', '8', '--map-udp', `127.0.0.1:${++port}`, '--payload-file', join(s.dir, 'r.json')])
+      replay = run(bin('aracua-bridge'), ['--ws', `127.0.0.1:${rp}`, '--replay', join(s.dir, 'logs', logs[0]), '--replay-speed', '8', '--map-udp', `127.0.0.1:${++port}`, '--payload-file', join(s.dir, 'r.json'), '--maintenance-file', join(s.dir, 'r.json') + '.manut'])
       await sleep(500)
       const r = await new Ponte(`ws://127.0.0.1:${rp}`).connect()
       const hello = await r.next('hello', 3_000).catch(() => r.msgs.find((m) => m.type === 'hello'))
@@ -213,6 +213,58 @@ const falhas = await suite('Ponte + simulador', [
       c.send({ cmd: 'calibrate', kind: 'level' })
       const e = await c.next('error', 3_000)
       if (!e.message.includes('desarmados')) throw new Error('calibrou armado')
+      c.close()
+    } finally { s.stop() }
+  }],
+
+  ['geocerca: envia, lê de volta e o veículo volta ao sair da área permitida', async () => {
+    const s = await pilha()
+    try {
+      const c = await s.cliente()
+      const sq = (half) => [[-half, -half], [half, -half], [half, half], [-half, half]].map(([e, n]) => desloca(HOME, n, e))
+      const fence = { inclusion: [sq(120)], exclusion: [sq(15).map((p) => ({ lat: p.lat + 0.0006, lon: p.lon }))], circles_inclusion: [], circles_exclusion: [] }
+      c.send({ cmd: 'fence_upload', fence })
+      const up = await c.next('fence_upload', 15_000)
+      if (!up.ok || up.count !== 8) throw new Error(`envio da geocerca: ${JSON.stringify(up)}`)
+      // Ponte nova lê a cerca do veículo sozinha (depois da missão).
+      s.ponte.kill()
+      await sleep(500)
+      s.ponte = run(bin('aracua-bridge'), ['--ws', `127.0.0.1:${s.ws}`, '--mavlink', `udpin:127.0.0.1:${s.mav}`, '--map-udp', `127.0.0.1:${s.map}`, '--no-log', '--payload-file', join(s.dir, 'entrega.json'), '--maintenance-file', join(s.dir, 'm.json')])
+      await sleep(500)
+      const c2 = await s.cliente()
+      await c2.until(() => c2.msgs.some((m) => m.type === 'vehicle_fence'), 15_000, 'geocerca lida do veículo')
+      const vf = c2.msgs.filter((m) => m.type === 'vehicle_fence').at(-1)
+      if (vf.inclusion.length !== 1 || vf.exclusion.length !== 1 || vf.inclusion[0].length !== 4) throw new Error(`geocerca lida: ${JSON.stringify(vf)}`)
+      if (metros(vf.inclusion[0][2], fence.inclusion[0][2]) > 0.5) throw new Error('vértice mudou de lugar')
+      // Missão com um ponto fora da área permitida: o veículo tem de voltar (RTL).
+      await voarMissao(c2, { items: [{ ...desloca(HOME, 60, 0), alt: 25 }, { ...desloca(HOME, 250, 0), alt: 25 }] })
+      await c2.until(() => c2.t.mode === 'RTL', 90_000, 'RTL ao sair da área permitida')
+      if (!c2.texts.some((t) => t.includes('Geocerca violada'))) throw new Error('sem aviso de geocerca violada')
+      c2.close()
+    } finally { s.stop() }
+  }],
+
+  ['manutenção: conta o voo e o ciclo da bateria', async () => {
+    const s = await pilha()
+    try {
+      const c = await s.cliente()
+      await c.until(() => c.msgs.some((m) => m.type === 'maintenance'), 5_000, 'registro de manutenção')
+      const m0 = c.msgs.filter((m) => m.type === 'maintenance').at(-1)
+      if (!m0 || m0.flights !== 0) throw new Error(`registro inicial: ${JSON.stringify(m0)}`)
+      c.send({ cmd: 'takeoff', alt: 12 })
+      await c.until(() => c.t.alt_rel > 10, 60_000, 'decolar')
+      await sleep(4000)
+      c.send({ cmd: 'mode', mode: 'LAND' })
+      await c.until(() => !c.t.armed, 60_000, 'pousar e desarmar')
+      await c.until(() => c.msgs.some((x) => x.type === 'maintenance' && x.flights === 1), 5_000, 'voo registrado')
+      const m = c.msgs.filter((x) => x.type === 'maintenance' && x.flights === 1).at(-1)
+      if (m.flight_s < 8) throw new Error(`tempo de voo ${m.flight_s} s`)
+      const bat = m.batteries.find((b) => b.id === m.active_battery)
+      if (bat?.cycles !== 1) throw new Error(`ciclos da bateria: ${bat?.cycles}`)
+      if (m.history[0]?.max_alt < 10) throw new Error(`altura máxima ${m.history[0]?.max_alt}`)
+      c.send({ cmd: 'maintenance_done', task: m.tasks[0].id, note: 'teste' })
+      const m2 = await c.next('maintenance', 5_000, (x) => x.notes.some((n) => n.text.includes('teste')))
+      if (m2.tasks[0].since_flights !== 0) throw new Error('a tarefa não zerou')
       c.close()
     } finally { s.stop() }
   }],

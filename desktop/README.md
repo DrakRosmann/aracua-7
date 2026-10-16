@@ -23,7 +23,7 @@ junto a ponte (`aracua-bridge`) e o veículo simulado (`fake-vehicle`) como exec
 * Toda conexão com veículo é gravada em `logs/*.tlog` na pasta de dados do app; a opção
   **Reproduzir voo** da tela Conectar lista esses arquivos (comando `list_logs`) e sobe a ponte com
   `--replay`.
-* A configuração da entrega e o contador ficam na pasta de dados do app
+* O registro de manutenção (`manutencao.json`), a configuração da entrega e o contador ficam na pasta de dados do app
   (`~/.local/share/io.github.drakrosmann.aracua7/` no Linux, `%APPDATA%\io.github.drakrosmann.aracua7\` no Windows).
 
 ## Compilar

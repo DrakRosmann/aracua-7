@@ -364,6 +364,34 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid rgb(var(--ink) / 0.5
 .cx-seg button + button { border-left: 1px solid rgb(var(--ink) / 0.1); }
 .cx-seg button.on { background: var(--blue); color: #fff; }
 
+/* Manutenção */
+.task { display: grid; grid-template-columns: 1fr 120px auto; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.task .th small { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+.task .bar { height: 8px; border-radius: 4px; background: rgb(var(--ink) / 0.1); overflow: hidden; position: relative; }
+.task .bar b { position: absolute; inset: 0 auto 0 0; background: var(--green); }
+.task.soon .bar b { background: var(--amber); }
+.task.due .bar b { background: var(--red); }
+.task.due .th b { color: var(--red); }
+.task .donebox { display: flex; gap: 6px; }
+.task .donebox input, .mrow input, .brow input.grow { background: var(--input); border: 1px solid rgb(var(--ink) / 0.14); border-radius: 4px; padding: 6px 8px; color: var(--fg); }
+.mrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.mrow label { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--muted); }
+.mrow input[type='number'] { width: 76px; }
+.mrow .grow, .brow .grow { flex: 1; min-width: 160px; }
+.note { padding: 5px 0; border-bottom: 1px solid var(--line); }
+.note small { color: var(--muted); margin-right: 6px; }
+.scard small { display: block; color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+tr.muted td { opacity: 0.5; }
+
+/* Geocerca */
+.fencerow { display: grid; grid-template-columns: 14px 1fr auto; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--line); }
+.fencerow small { display: block; color: var(--muted); font-size: 11px; }
+.fencerow .sw { width: 12px; height: 12px; border-radius: 3px; }
+.fencerow.inclusion .sw { background: rgba(47, 207, 95, 0.35); border: 2px solid var(--green); }
+.fencerow.exclusion .sw { background: rgba(239, 74, 60, 0.35); border: 2px solid var(--red); }
+.drawbox { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; padding: 10px; border-radius: 6px; border: 1px solid #f2c94c; background: rgba(242, 201, 76, 0.08); }
+button.link { background: none; border: 0; padding: 0; color: var(--blue-2); text-decoration: underline; cursor: pointer; }
+
 /* Calibração, reprodução e pré-voo */
 .calstep { display: flex; flex-direction: column; gap: 8px; padding: 12px; margin: 8px 0; border-radius: 6px; background: rgb(var(--ink) / 0.06); border: 1px solid var(--blue-2); }
 .calstep b { font-size: 15px; }
@@ -391,4 +419,56 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid rgb(var(--ink) / 0.5
 @media (max-width: 760px) {
   .replay small { display: none; }
   .calbar { grid-template-columns: 80px 1fr 56px; }
+}
+
+/* Tablet e telas de toque: alvos de pelo menos ~44 px, texto dos campos em 16 px (o iOS
+   não dá zoom ao focar) e sem atraso de toque duplo. Vale para qualquer largura com dedo. */
+@media (pointer: coarse) {
+  button, a, input, select, summary, label { touch-action: manipulation; }
+  .btn { min-height: 42px; padding: 8px 14px; font-size: 13.5px; }
+  .btn svg { width: 18px; height: 18px; }
+  .ib { min-width: 40px; min-height: 40px; font-size: 16px; }
+  .rb { width: 66px; min-height: 60px; font-size: 10px; }
+  .rb svg { width: 26px; height: 26px; }
+  .tb { padding: 0 16px; }
+  .pill, .stat { min-height: 36px; }
+  .menu > button { padding: 12px 16px; font-size: 14px; }
+  .pnav button { padding: 13px 14px; font-size: 14.5px; }
+  input, select, textarea { font-size: 16px; }
+  .num input, .grid2 input, .grid2 select, .fin input, .fin select, .wprow input, .grid4 input, .grid4 select,
+  .cx-fields select, .cx-fields input, .mrow input, .brow input.grow, .task .donebox input { min-height: 40px; padding: 7px 10px; }
+  input[type='checkbox'], input[type='radio'], .tog input, .fin input[type='checkbox'] { width: 22px; height: 22px; }
+  input[type='range'] { height: 32px; }
+  summary { min-height: 44px; }
+  .wprow { min-height: 52px; }
+  .chip { min-height: 38px; padding: 0 14px; }
+  .stick { width: 140px; height: 140px; }
+  .replay { padding: 10px 16px; gap: 12px; }
+  .replay .btn { min-width: 48px; }
+  .slot { min-height: 52px; }
+}
+
+/* Tablet (largura entre celular e computador): painéis mais estreitos e mostradores menores
+   para sobrar mapa. */
+@media (min-width: 761px) and (max-width: 1180px) {
+  .rp { width: 280px; max-height: calc(100% - 330px); }
+  .dp { width: 270px; left: 92px; max-height: calc(100% - 290px); }
+  .pip { width: 150px; height: 150px; }
+  #cvAtt { width: 210px; height: 120px; }
+  #cvSpeed { width: 120px; height: 120px; right: 238px; }
+  #cvCompass { width: 120px; height: 120px; bottom: 148px; }
+  .page { grid-template-columns: 190px minmax(0, 1fr); }
+  .pbody { padding: 18px 20px 48px; }
+}
+/* Tablet em pé: mostradores numa linha só, embaixo, sem cobrir os painéis. */
+@media (min-width: 761px) and (max-width: 1180px) and (orientation: portrait) {
+  .rp { max-height: calc(100% - 300px); }
+  .dp { max-height: 38%; }
+}
+/* Barra superior estreita (tablet em pé): só ícones nas abas e nos indicadores. */
+@media (min-width: 761px) and (max-width: 960px) {
+  .tb .lbl, .tb.act .lbl, .stat small { display: none; }
+  .tb { padding: 0 12px; }
+  .stat { padding: 0 6px; }
+  .pill { padding: 0 10px; margin-right: 4px; }
 }

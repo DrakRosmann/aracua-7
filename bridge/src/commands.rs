@@ -32,6 +32,14 @@ pub enum Command {
     },
     /// Lê a missão que está no veículo.
     MissionDownload,
+    /// Envia a geocerca (polígonos e círculos). `enable` liga FENCE_ENABLE.
+    FenceUpload {
+        fence: aracua_bridge::fence::Fence,
+        #[serde(default = "yes")]
+        enable: bool,
+    },
+    /// Lê a geocerca que está no veículo.
+    FenceDownload,
     MissionStart { #[serde(default)] force: bool },
     Manual { x: f32, y: f32, z: f32, r: f32 },
     ParamGet { id: String },
@@ -75,11 +83,28 @@ pub enum Command {
     AccelPos { position: u32 },
     /// Reinicia a controladora (só desarmada).
     Reboot,
+    // ---- Manutenção ----
+    MaintenanceGet,
+    /// Aeronave, baterias (com a em uso) e tarefas periódicas.
+    MaintenanceConfig {
+        airframe: String,
+        batteries: Vec<crate::maintenance::Battery>,
+        #[serde(default)]
+        active_battery: Option<u32>,
+        tasks: Vec<crate::maintenance::Task>,
+    },
+    /// Tarefa feita agora (zera a contagem dela).
+    MaintenanceDone { task: u32, #[serde(default)] note: Option<String> },
+    MaintenanceNote { text: String },
 }
 
 /// Comandos que fazem sentido reproduzindo um voo gravado (os outros iriam para lugar nenhum).
 fn allowed_in_replay(c: &Command) -> bool {
-    matches!(c, Command::Replay { .. } | Command::MapReset | Command::PayloadGet)
+    matches!(
+        c,
+        Command::Replay { .. } | Command::MapReset | Command::PayloadGet
+            | Command::MaintenanceGet | Command::MaintenanceConfig { .. } | Command::MaintenanceDone { .. } | Command::MaintenanceNote { .. }
+    )
 }
 
 /// Limites das verificações de pré-voo da ponte.
@@ -145,6 +170,10 @@ fn send_param(link: &Link, id: &str, value: f32) -> Result<(), String> {
 
 /// Executa um comando. Erros voltam para a interface como `{type:"error"}`.
 pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
+    let is_maintenance = matches!(
+        cmd,
+        Command::MaintenanceGet | Command::MaintenanceConfig { .. } | Command::MaintenanceDone { .. } | Command::MaintenanceNote { .. }
+    );
     let link = &shared.link;
     if link.is_replay() && !allowed_in_replay(&cmd) {
         return Err("reproduzindo um voo gravado: comandos ao veículo estão desligados".into());
@@ -266,6 +295,41 @@ pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
                 return Err("aguarde o envio da missão terminar".into());
             }
             shared.downloader.lock().unwrap().start(link);
+        }
+        Command::FenceUpload { fence, enable } => {
+            fence.validate()?;
+            let items = fence.items(link.target());
+            if items.len() > 500 {
+                return Err(format!("geocerca com {} itens (máximo 500)", items.len()));
+            }
+            if shared.fence_down.lock().unwrap().is_active() {
+                return Err("aguarde o download da geocerca terminar".into());
+            }
+            // FENCE_TYPE: bit 4 = polígonos e círculos da lista. Sem ele o ArduPilot ignora a cerca.
+            if fence.has_polygons() {
+                let cur = shared.state.lock().unwrap().params.get("FENCE_TYPE").copied();
+                match cur {
+                    Some(v) if (v as u32) & 4 == 0 => {
+                        send_param(link, "FENCE_TYPE", ((v as u32) | 4) as f32)?;
+                        shared.emit(serde_json::json!({"type":"statustext","severity":5,
+                            "text":format!("Ponte: FENCE_TYPE = {} (liga a cerca por polígono)", (v as u32) | 4)}));
+                    }
+                    Some(_) => {}
+                    None => shared.emit(serde_json::json!({"type":"statustext","severity":4,
+                        "text":"Ponte: FENCE_TYPE ainda não foi lido; confira se o bit 4 (polígono) está ligado"})),
+                }
+            }
+            if enable && !fence.is_empty() {
+                send_param(link, "FENCE_ENABLE", 1.0)?;
+            }
+            *shared.fence_pending.lock().unwrap() = Some(fence);
+            shared.fence_up.lock().unwrap().start(link, crate::mission::Built { items, wp_seq: vec![] });
+        }
+        Command::FenceDownload => {
+            if shared.fence_up.lock().unwrap().is_active() {
+                return Err("aguarde o envio da geocerca terminar".into());
+            }
+            shared.fence_down.lock().unwrap().start(link);
         }
         Command::MissionStart { force } => {
             let t = shared.state.lock().unwrap().t.clone();
@@ -442,6 +506,19 @@ pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
             }
             link.command_long(MavCmd::MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         }
+        Command::MaintenanceGet => {}
+        Command::MaintenanceConfig { airframe, batteries, active_battery, tasks } => {
+            shared.maintenance.lock().unwrap().configure(airframe, batteries, active_battery, tasks)?;
+        }
+        Command::MaintenanceDone { task, note } => {
+            shared.maintenance.lock().unwrap().task_done(task, note, now_ms())?;
+        }
+        Command::MaintenanceNote { text } => {
+            shared.maintenance.lock().unwrap().add_note(text, now_ms())?;
+        }
+    }
+    if is_maintenance {
+        shared.emit_maintenance();
     }
     Ok(())
 }

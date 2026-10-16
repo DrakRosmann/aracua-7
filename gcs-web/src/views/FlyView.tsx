@@ -55,6 +55,7 @@ function FlyRail() {
       <div className="rg">
         <button className={`rb ${station.follow ? 'on' : ''}`} onClick={() => { station.follow = !station.follow; station.emit('ui') }}><Icon.target />{tr('Seguir')}</button>
         <button className={`rb ${station.lidarLayer ? 'on' : ''}`} onClick={() => { station.lidarLayer = !station.lidarLayer; station.emit('ui') }}><Icon.layers />{tr('LiDAR')}</button>
+        <button className={`rb ${station.map3d ? 'on' : ''}`} title={tr('Mapa inclinado com os obstáculos do LiDAR em 3D; gire com o botão direito ou com dois dedos')} onClick={() => { station.map3d = !station.map3d; station.emit('ui') }}><Icon.cube />{tr('3D')}</button>
         <button className={`rb ${station.deliveryOpen ? 'on' : ''}`} onClick={() => { station.deliveryOpen = !station.deliveryOpen; station.emit('ui') }}><Icon.drop />{tr('Entrega')}</button>
         <button className="rb" onClick={() => station.mapApi?.zoomBy(1)}><Icon.plus />{tr('Zoom')}</button>
         <button className="rb" onClick={() => station.mapApi?.zoomBy(-1)}><Icon.minus />{tr('Zoom')}</button>
@@ -74,7 +75,7 @@ function Val({ label, value, unit }: { label: string; value: string; unit?: stri
 
 function FlyPanel() {
   useChannels('telemetry', 'params', 'map')
-  const [collapsed, setCollapsed] = useState(innerWidth < 760)
+  const [collapsed, setCollapsed] = useState(innerWidth < 760 || (innerWidth < 1180 && matchMedia('(pointer: coarse)').matches))
   const [tilt, setTilt] = useState(-30)
   const t = station.telem
   const home = t?.home

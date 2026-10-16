@@ -6,6 +6,7 @@ import { clamp, fmtDist, fmtDuration, wpName } from '../lib/format'
 import { distance, survey, type LatLon } from '../lib/geo'
 import { Icon } from '../components/Icons'
 import { DropPicker } from '../components/Delivery'
+import { FenceEditor } from '../components/FenceEditor'
 import { vehicleClass, type MissionItem } from '../types'
 import { t as tr } from '../lib/i18n'
 
@@ -37,9 +38,10 @@ function PlanRail() {
       <div className="rg">
         <button className={`rb ${station.addMode ? 'on' : ''}`} onClick={() => { station.addMode = !station.addMode; station.emit('ui') }}><Icon.pinAdd />{tr('Waypoint')}</button>
         <button className={`rb ${station.surveyPreview ? 'on' : ''}`} onClick={() => document.getElementById('survey')?.toggleAttribute('open')}><Icon.grid />{tr('Varredura')}</button>
+        <button className={`rb ${station.drawing ? 'on' : ''}`} onClick={() => document.getElementById('fence')?.toggleAttribute('open')}><Icon.fence />{tr('Geocerca')}</button>
         <button className="rb" onClick={() => station.telem?.lat && station.mapApi?.flyTo(station.telem)}><Icon.target />{tr('Veículo')}</button>
         <button className="rb" onClick={() => {
-          const pts: LatLon[] = [...station.plan]
+          const pts: LatLon[] = [...station.plan, ...station.fenceDraft.inclusion.flat(), ...station.fenceDraft.exclusion.flat()]
           if (station.telem?.home) pts.push(station.telem.home)
           station.mapApi?.fit(pts)
         }}><Icon.fit />{tr('Ajustar')}</button>
@@ -150,6 +152,7 @@ function PlanPanel() {
           {!plan.length && <div className="empty">{tr('Nenhum waypoint. Clique no mapa ou gere uma varredura.')}</div>}
         </div>
         <SurveyForm />
+        <FenceEditor />
         {wing && (
           <div className="db top-line">
             <div className="sub">{tr('Fim da missão (asa fixa)')}</div>

@@ -8,13 +8,15 @@ import { decodeMapFrame } from './mapframe'
 import { desktop, describeLink, isDesktop, saveLink, savedLink, type LinkConfig, type LinkStatus } from './desktop'
 import { vehicleClass, type CalibEvent, type ClientCommand, type LogEntry, type LogLevel, type MissionItem, type PayloadState, type ReleaseEvent, type ReplayState, type Sample, type ServerMessage, type Telemetry, type VehicleMission } from '../types'
 import { paramIdsFor } from './params'
+import { emptyFence, type FenceData } from './fence'
+import type { MaintenanceState } from '../types'
 import { setupTiles, type Bounds } from './tiles'
 import { getLang, setLang, t as tr, tk, type Lang } from './i18n'
 
 // Origens de lançamento que a ponte manda (em português, traduzidas na tela).
 tk('missão'); tk('externo'); tk('estação')
 
-export type Channel = 'telemetry' | 'log' | 'params' | 'mission' | 'map' | 'ui' | 'conn' | 'payload' | 'link' | 'replay' | 'calib'
+export type Channel = 'telemetry' | 'log' | 'params' | 'mission' | 'map' | 'ui' | 'conn' | 'payload' | 'link' | 'replay' | 'calib' | 'fence' | 'maint'
 export type View = 'fly' | 'plan' | 'setup' | 'analyze'
 
 export interface Settings {
@@ -86,10 +88,13 @@ class Station {
   view: View = 'fly'
   follow = true
   lidarLayer = true
+  /** Mapa inclinado com os voxels do LiDAR em blocos 3D. */
+  map3d = false
   addMode = true
   videoBig = false
   /** Painel de entrega visível na tela de voo. */
-  deliveryOpen = true
+  // Em tablet o painel de entrega começa fechado, para sobrar mapa.
+  deliveryOpen = !(typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse) and (max-width: 1180px)').matches)
   surveyPreview: { width: number; height: number; spacing: number; northSouth: boolean } | null = null
   /** Preenchido pelo MapView para que outros componentes controlem o mapa. */
   mapApi: { center(): LatLon; zoom(): number; bounds(): Bounds; zoomBy(d: number): void; flyTo(p: LatLon): void; fit(pts: LatLon[]): void } | null = null
@@ -111,6 +116,16 @@ class Station {
   replay: ReplayState | null = null
   /** Andamento das calibrações. */
   calib: { accel: { status: string; position: number } | null; compass: Record<number, { pct: number; status: string; fitness?: number }> } = { accel: null, compass: {} }
+  /** Geocerca no veículo (lida dele ou enviada daqui) e o rascunho em edição. */
+  vehicleFence: FenceData | null = null
+  fenceDraft: FenceData = emptyFence()
+  /** O rascunho foi mexido desde que veio do veículo. */
+  fenceEdited = false
+  fenceUpload: { state: 'idle' | 'sending' | 'ok' | 'error'; text: string } = { state: 'idle', text: '' }
+  /** Área sendo desenhada no mapa. */
+  drawing: { kind: 'inclusion' | 'exclusion'; pts: LatLon[] } | null = null
+  /** Registro de manutenção (vem da ponte). */
+  maint: MaintenanceState | null = null
   /** Captura dos extremos do rádio na calibração. */
   rcCapture: { min: number[]; max: number[] } | null = null
   /** Último comando barrado pelo pré-voo da ponte, para "fazer mesmo assim". */
@@ -354,6 +369,26 @@ class Station {
       case 'calib':
         this.onCalib(m)
         break
+      case 'vehicle_fence': {
+        const { type: _t, ...f } = m
+        this.vehicleFence = f
+        // O rascunho segue o veículo enquanto o operador não mexeu nele.
+        if (!this.fenceEdited) this.fenceDraft = structuredClone(f)
+        this.emit('fence')
+        break
+      }
+      case 'fence_upload':
+        this.fenceUpload = m.ok
+          ? { state: 'ok', text: tr('Geocerca enviada ({count} itens)', { count: m.count }) }
+          : { state: 'error', text: tr('Falha no envio da geocerca: {result}', { result: m.result }) }
+        if (m.ok) this.fenceEdited = false
+        this.addLog(m.ok ? 'ok' : 'error', this.fenceUpload.text)
+        this.emit('fence')
+        break
+      case 'maintenance':
+        this.maint = m
+        this.emit('maint')
+        break
       case 'statustext':
         this.addLog(SEVERITY[m.severity] ?? 'info', m.text)
         break
@@ -574,6 +609,55 @@ class Station {
       this.emit('mission')
     }
   }
+  // ---------- geocerca ----------
+  startDrawing(kind: 'inclusion' | 'exclusion') {
+    this.drawing = { kind, pts: [] }
+    this.emit('fence', 'ui')
+  }
+  addDrawPoint(p: LatLon) {
+    if (!this.drawing) return
+    this.drawing.pts.push(p)
+    this.emit('fence')
+  }
+  undoDrawPoint() {
+    this.drawing?.pts.pop()
+    this.emit('fence')
+  }
+  finishDrawing() {
+    const d = this.drawing
+    if (d && d.pts.length >= 3) {
+      this.fenceDraft[d.kind].push(d.pts)
+      this.fenceEdited = true
+    }
+    this.drawing = null
+    this.emit('fence', 'ui')
+  }
+  cancelDrawing() {
+    this.drawing = null
+    this.emit('fence', 'ui')
+  }
+  removeFenceArea(kind: 'inclusion' | 'exclusion' | 'circles_inclusion' | 'circles_exclusion', i: number) {
+    this.fenceDraft[kind].splice(i, 1)
+    this.fenceEdited = true
+    this.emit('fence')
+  }
+  clearFenceDraft() {
+    this.fenceDraft = emptyFence()
+    this.fenceEdited = true
+    this.emit('fence')
+  }
+  fenceFromVehicle() {
+    this.fenceDraft = structuredClone(this.vehicleFence ?? emptyFence())
+    this.fenceEdited = false
+    this.emit('fence')
+  }
+  uploadFence() {
+    if (this.send({ cmd: 'fence_upload', fence: this.fenceDraft, enable: true })) {
+      this.fenceUpload = { state: 'sending', text: tr('Enviando geocerca…') }
+      this.emit('fence')
+    }
+  }
+
   /** Copia a missão do veículo para o plano em edição. */
   planFromVehicle() {
     const m = this.vehicleMission
@@ -608,6 +692,12 @@ function describe(c: ClientCommand): string {
     case 'calibrate': return tr('Calibrar: {what}', { what: tr({ accel: tk('acelerômetro (6 posições)'), level: tk('nivelar'), gyro: tk('giroscópio'), compass: tk('bússola'), compass_accept: tk('aceitar bússola'), compass_cancel: tk('cancelar bússola') }[c.kind]) })
     case 'accel_pos': return tr('Calibração: posição {position} pronta', { position: c.position })
     case 'reboot': return tr('Reiniciar controladora')
+    case 'fence_upload': return tr('Enviar geocerca ({n} áreas)', { n: c.fence.inclusion.length + c.fence.exclusion.length + c.fence.circles_inclusion.length + c.fence.circles_exclusion.length })
+    case 'fence_download': return tr('Ler geocerca do veículo')
+    case 'maintenance_get': return tr('Ler registro de manutenção')
+    case 'maintenance_config': return tr('Salvar configuração de manutenção')
+    case 'maintenance_done': return tr('Tarefa de manutenção feita')
+    case 'maintenance_note': return tr('Anotação de manutenção')
     case 'param_set': return tr('Parâmetro {id} = {value}', { id: c.id, value: c.value })
     case 'param_get': return `Ler ${c.id}`
     case 'photo': return tr('Tirar foto')

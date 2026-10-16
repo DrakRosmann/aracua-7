@@ -156,6 +156,24 @@ fn ray(o: [f64; 3], d: [f64; 3], max: f64, boxes: &[&Bx]) -> Option<(f64, bool)>
     hit.then_some((best, ground))
 }
 
+/// Motivo da violação da geocerca por polígono/círculo, se houver (mesma regra do ArduPilot:
+/// dentro de todas as áreas permitidas e fora de todas as proibidas).
+fn polygon_breach(f: &aracua_bridge::fence::Fence, (lat, lon): (f64, f64)) -> Option<&'static str> {
+    use aracua_bridge::fence::{inside, Point};
+    let p = Point { lat, lon };
+    let dist = |c: &aracua_bridge::fence::Circle| {
+        let (dn, de) = ((c.lat - lat) * 111_320.0, (c.lon - lon) * 111_320.0 * lat.to_radians().cos());
+        dn.hypot(de)
+    };
+    if f.inclusion.iter().any(|poly| !inside(p, poly)) || f.circles_inclusion.iter().any(|c| dist(c) > c.radius as f64) {
+        return Some("fora da área permitida");
+    }
+    if f.exclusion.iter().any(|poly| inside(p, poly)) || f.circles_exclusion.iter().any(|c| dist(c) < c.radius as f64) {
+        return Some("dentro de área proibida");
+    }
+    None
+}
+
 struct Vehicle {
     class: VehicleClass,
     /// Velocidade em relação ao ar (asa fixa).
@@ -183,7 +201,10 @@ struct Vehicle {
     target_alt: f64,
     guided_target: Option<(f64, f64)>,
     mission: Vec<MISSION_ITEM_INT_DATA>,
-    incoming: Option<(u16, Vec<MISSION_ITEM_INT_DATA>)>,
+    /// Geocerca recebida (itens) e já interpretada.
+    fence_items: Vec<MISSION_ITEM_INT_DATA>,
+    fence: aracua_bridge::fence::Fence,
+    incoming: Option<(MavMissionType, u16, Vec<MISSION_ITEM_INT_DATA>)>,
     cur: u16,
     manual: (f64, f64, f64, f64, Instant),
     used_mah: f64,
@@ -334,7 +355,7 @@ fn main() -> anyhow::Result<()> {
 
     let class = args.vehicle;
     let common: &[(&str, f32)] = &[
-        ("FENCE_ENABLE", 1.0), ("FENCE_RADIUS", 400.0), ("FENCE_ACTION", 1.0),
+        ("FENCE_ENABLE", 1.0), ("FENCE_RADIUS", 400.0), ("FENCE_ACTION", 1.0), ("FENCE_TYPE", 7.0),
         ("BATT_LOW_MAH", 750.0), ("BATT_FS_LOW_ACT", 2.0), ("FS_GCS_ENABLE", 1.0),
         ("AVOID_ENABLE", 7.0), ("AVOID_DIST_MAX", 9.0),
     ];
@@ -359,7 +380,7 @@ fn main() -> anyhow::Result<()> {
     let v = Arc::new(Mutex::new(Vehicle {
         class, airspeed: 0.0, orbit: None, leg_start: (0.0, 0.0), accel_step: None, mag_cal: None,
         e: 0.0, n: 0.0, alt: 0.0, ve: 0.0, vn: 0.0, vz: 0.0, hdg: 48.0, roll: 0.0, pitch: 0.0, yaw_rate: 0.0,
-        armed: false, mode: modes::mode_number(class, start_mode).unwrap_or(0), target_alt: 0.0, guided_target: None, mission: vec![], incoming: None, cur: 0,
+        armed: false, mode: modes::mode_number(class, start_mode).unwrap_or(0), target_alt: 0.0, guided_target: None, mission: vec![], fence_items: vec![], fence: Default::default(), incoming: None, cur: 0,
         manual: (0.0, 0.0, 0.5, 0.0, Instant::now()), used_mah: 0.0, current: 0.0, landed_t: 0.0, params,
         texts: vec![], boot: Instant::now(), servo: [0; 16], relay: [false; 8],
         present: [true, true, true, true, false, false], refill_at: [None; 6], loiter_until: None,
@@ -516,35 +537,54 @@ fn main() -> anyhow::Result<()> {
                 MavMessage::MANUAL_CONTROL(m) => {
                     s.manual = (m.x as f64 / 1000.0, m.y as f64 / 1000.0, m.z as f64 / 1000.0, m.r as f64 / 1000.0, Instant::now());
                 }
+                // Protocolo de missão: missão comum e geocerca (mission_type FENCE).
                 MavMessage::MISSION_COUNT(c) => {
-                    s.incoming = Some((c.count, vec![]));
-                    if c.count > 0 {
-                        send(MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA { seq: 0, target_system: 255, target_component: 190, ..Default::default() }));
+                    let mt = c.mission_type;
+                    if c.count == 0 {
+                        match mt {
+                            MavMissionType::MAV_MISSION_TYPE_FENCE => {
+                                s.fence_items.clear();
+                                s.fence = Default::default();
+                            }
+                            _ => s.mission.clear(),
+                        }
+                        send(MavMessage::MISSION_ACK(MISSION_ACK_DATA { target_system: 255, target_component: 190, mavtype: MavMissionResult::MAV_MISSION_ACCEPTED, mission_type: mt, ..Default::default() }));
+                    } else {
+                        s.incoming = Some((mt, c.count, vec![]));
+                        send(MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA { seq: 0, target_system: 255, target_component: 190, mission_type: mt }));
                     }
                 }
                 MavMessage::MISSION_ITEM_INT(it) => {
-                    if let Some((count, mut items)) = s.incoming.take() {
-                        if it.seq as usize == items.len() {
+                    if let Some((mt, count, mut items)) = s.incoming.take() {
+                        if it.seq as usize == items.len() && it.mission_type == mt {
                             items.push(it);
                         }
                         if items.len() as u16 == count {
                             let n = items.len();
-                            s.mission = items;
-                            s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Missão recebida: {} itens", n));
-                            send(MavMessage::MISSION_ACK(MISSION_ACK_DATA { target_system: 255, target_component: 190, mavtype: MavMissionResult::MAV_MISSION_ACCEPTED, ..Default::default() }));
+                            if mt == MavMissionType::MAV_MISSION_TYPE_FENCE {
+                                s.fence = aracua_bridge::fence::Fence::parse(&items);
+                                s.fence_items = items;
+                                s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Geocerca recebida: {} itens", n));
+                            } else {
+                                s.mission = items;
+                                s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Missão recebida: {} itens", n));
+                            }
+                            send(MavMessage::MISSION_ACK(MISSION_ACK_DATA { target_system: 255, target_component: 190, mavtype: MavMissionResult::MAV_MISSION_ACCEPTED, mission_type: mt, ..Default::default() }));
                         } else {
                             let next = items.len() as u16;
-                            s.incoming = Some((count, items));
-                            send(MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA { seq: next, target_system: 255, target_component: 190, ..Default::default() }));
+                            s.incoming = Some((mt, count, items));
+                            send(MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA { seq: next, target_system: 255, target_component: 190, mission_type: mt }));
                         }
                     }
                 }
-                MavMessage::MISSION_REQUEST_LIST(_) => {
-                    send(MavMessage::MISSION_COUNT(MISSION_COUNT_DATA { count: s.mission.len() as u16, target_system: 255, target_component: 190, ..Default::default() }));
+                MavMessage::MISSION_REQUEST_LIST(r) => {
+                    let n = if r.mission_type == MavMissionType::MAV_MISSION_TYPE_FENCE { s.fence_items.len() } else { s.mission.len() };
+                    send(MavMessage::MISSION_COUNT(MISSION_COUNT_DATA { count: n as u16, target_system: 255, target_component: 190, mission_type: r.mission_type, ..Default::default() }));
                 }
                 MavMessage::MISSION_REQUEST_INT(r) if s.incoming.is_none() => {
-                    if let Some(it) = s.mission.get(r.seq as usize) {
-                        send(MavMessage::MISSION_ITEM_INT(MISSION_ITEM_INT_DATA { target_system: 255, target_component: 190, ..it.clone() }));
+                    let list = if r.mission_type == MavMissionType::MAV_MISSION_TYPE_FENCE { &s.fence_items } else { &s.mission };
+                    if let Some(it) = list.get(r.seq as usize) {
+                        send(MavMessage::MISSION_ITEM_INT(MISSION_ITEM_INT_DATA { target_system: 255, target_component: 190, mission_type: r.mission_type, ..it.clone() }));
                     }
                 }
                 MavMessage::PARAM_REQUEST_READ(p) => {
@@ -588,6 +628,7 @@ fn main() -> anyhow::Result<()> {
         let p = |k: &str, d: f32| params.get(k).copied().unwrap_or(d) as f64;
         let (wp_speed, loit_speed, climb, rtl_alt) = (p("WPNAV_SPEED", 900.0) / 100.0, p("LOIT_SPEED", 1200.0) / 100.0, p("PILOT_SPEED_UP", 400.0) / 100.0, p("RTL_ALT", 3000.0) / 100.0);
         let fence = (p("FENCE_ENABLE", 1.0) > 0.5, p("FENCE_RADIUS", 400.0));
+        let fence_poly = fence.0 && (p("FENCE_TYPE", 7.0) as u32) & 4 != 0;
         let avoid_dist = if p("AVOID_ENABLE", 7.0) > 0.0 { p("AVOID_DIST_MAX", 9.0) } else { 0.0 };
         let (fx, fy) = (s.hdg.to_radians().sin(), s.hdg.to_radians().cos());
         let (mut de, mut dn, mut dz, mut dyaw) = (0.0, 0.0, 0.0, 0.0);
@@ -776,6 +817,12 @@ fn main() -> anyhow::Result<()> {
         if fence.0 && air && s.e.hypot(s.n) > fence.1 && !returning {
             s.go("RTL");
             s.say(MavSeverity::MAV_SEVERITY_CRITICAL, "Geocerca violada: RTL");
+        }
+        if fence_poly && air && !returning {
+            if let Some(why) = polygon_breach(&s.fence, to_ll(s.e, s.n)) {
+                s.go("RTL");
+                s.say(MavSeverity::MAV_SEVERITY_CRITICAL, format!("Geocerca violada ({why}): RTL"));
+            }
         }
         if air && soc * 5000.0 < p("BATT_LOW_MAH", 750.0) && !returning {
             s.go("RTL");

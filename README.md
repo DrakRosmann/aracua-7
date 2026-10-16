@@ -67,6 +67,17 @@ O que mais a estação faz:
   Respeite os termos do servidor de tiles.
 * **Calibração guiada:** acelerômetro (6 posições ou só nivelar), bússola com progresso, giroscópio e
   rádio (captura de extremos e gravação de `RCn_MIN/MAX/TRIM`).
+* **Geocerca em polígono:** em Planejar → Geocerca, desenhe no mapa áreas permitidas (verde) e
+  proibidas (vermelho) e envie ao veículo. A estação avisa se algum waypoint ou o home viola a cerca, e
+  a ponte liga o bit de polígono em `FENCE_TYPE` quando precisa. Ao conectar, a cerca do veículo é lida.
+* **Manutenção:** a ponte conta horas de voo, voos e ciclos da bateria em uso (do armar ao desarmar,
+  se ficou no ar mais de 5 s) e guarda em `manutencao.json` (`--maintenance-file`). Em
+  **Configurar → Manutenção** ficam as tarefas periódicas (por horas ou voos), as baterias, as anotações
+  e o histórico de voos.
+* **Mapa 3D:** o botão **3D** da tela de voo inclina o mapa e mostra os obstáculos do LiDAR como blocos;
+  gire com o botão direito do mouse ou com dois dedos.
+* **Tablet:** em telas de toque os botões e campos ficam maiores, e entre 760 e 1180 px os painéis e
+  mostradores encolhem para sobrar mapa.
 * **Idioma e tema:** português ou inglês, tema escuro, claro ou o do sistema
   (**Configurar → Estação → Aparência**). As mensagens da ponte e do ArduPilot aparecem como chegam.
 
@@ -204,7 +215,8 @@ De ponta a ponta (Node 22, depois de `cargo build --bins` em `bridge/`):
 
 ```bash
 node tests/simulador.mjs          # ponte + fake-vehicle: token, missão e download, entrega em voo do
-                                  # avião, pouso, VTOL, gravação e reprodução, calibrações, rádio
+                                  # avião, pouso, VTOL, gravação e reprodução, calibrações, geocerca,
+                                  # manutenção, rádio
 tests/baixar-sitl.sh              # baixa o SITL oficial (ArduCopter e ArduPlane estáveis) em tests/.sitl
 node tests/sitl.mjs               # ponte + SITL: missão com entrega, download, RTL e pouso (Copter);
                                   # TAKEOFF, missão e pouso com DO_LAND_START (Plane)

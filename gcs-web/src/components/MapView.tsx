@@ -7,7 +7,8 @@ import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { station } from '../lib/store'
 import { PROTOCOL_URL, setupTiles } from '../lib/tiles'
-import { circle, rectangle, survey, type LatLon } from '../lib/geo'
+import { fenceIsEmpty, sameFence, type FenceData } from '../lib/fence'
+import { circle, enuToLatLon, rectangle, survey, type LatLon } from '../lib/geo'
 import { wpName } from '../lib/format'
 import { vehicleClass, type VehicleClass } from '../types'
 import { t as tr } from '../lib/i18n'
@@ -17,6 +18,8 @@ setWorkerUrl(workerUrl)
 const EMPTY: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] }
 const MAX_OBSTACLE_POINTS = 60_000
 const MAX_GROUND_POINTS = 40_000
+/** No 3D cada voxel vira um bloco (polígono extrudado): limite menor para manter a fluidez. */
+const MAX_BLOCKS = 25_000
 
 /** Silhueta vista de cima, com a proa para cima (o mapa gira pelo rumo). */
 const SILHOUETTE: Record<VehicleClass, string> = {
@@ -71,6 +74,7 @@ export function MapView() {
       attributionControl: { compact: true },
     })
     map.touchZoomRotate.disableRotation()
+    map.touchPitch.disable()
 
     const vehicle = new Marker({ element: vehicleElement() }).setLngLat(map.getCenter())
     const home = new Marker({ element: Object.assign(document.createElement('div'), { className: 'home-marker', textContent: 'H' }) })
@@ -99,12 +103,25 @@ export function MapView() {
     const src = (id: string) => map.getSource(id) as GeoJSONSource | undefined
 
     map.on('load', () => {
-      for (const id of ['fence', 'trail', 'route', 'vmission', 'survey', 'voxels']) map.addSource(id, { type: 'geojson', data: EMPTY })
+      for (const id of ['fence', 'fenceareas', 'drawing', 'trail', 'route', 'vmission', 'survey', 'voxels', 'voxels3d']) map.addSource(id, { type: 'geojson', data: EMPTY })
       map.addLayer({ id: 'voxels', type: 'circle', source: 'voxels', paint: {
         'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 0.6, 18, 2.2, 20, 5],
         'circle-color': ['case', ['==', ['get', 'c'], 0], 'rgba(0,229,255,0.35)',
           ['interpolate', ['linear'], ['get', 'u'], 0, '#3bd4ff', 15, '#7cf29c', 30, '#ffd23f', 45, '#ff6b3d']],
         'circle-opacity': ['case', ['==', ['get', 'c'], 0], 0.45, 0.9],
+      } })
+      // Áreas da geocerca: verde = permitida, vermelho = proibida; tracejado = rascunho ainda não enviado.
+      const fcolor = ['match', ['get', 'kind'], 'inclusion', '#2fcf5f', '#ef4a3c'] as unknown as string
+      map.addLayer({ id: 'fence-fill', type: 'fill', source: 'fenceareas', paint: { 'fill-color': fcolor, 'fill-opacity': ['match', ['get', 'kind'], 'inclusion', 0.06, 0.22] as unknown as number } })
+      map.addLayer({ id: 'fence-line', type: 'line', source: 'fenceareas', filter: ['==', ['get', 'draft'], false], paint: { 'line-color': fcolor, 'line-width': 2.5 } })
+      map.addLayer({ id: 'fence-draft', type: 'line', source: 'fenceareas', filter: ['==', ['get', 'draft'], true], paint: { 'line-color': fcolor, 'line-width': 2, 'line-dasharray': [3, 2] } })
+      map.addLayer({ id: 'drawing-line', type: 'line', source: 'drawing', paint: { 'line-color': '#f2c94c', 'line-width': 2.5, 'line-dasharray': [2, 1.5] } })
+      map.addLayer({ id: 'drawing-pts', type: 'circle', source: 'drawing', filter: ['==', ['geometry-type'], 'Point'], paint: { 'circle-radius': 5, 'circle-color': '#f2c94c', 'circle-stroke-color': '#1b1d21', 'circle-stroke-width': 1.5 } })
+      map.addLayer({ id: 'voxels3d', type: 'fill-extrusion', source: 'voxels3d', layout: { visibility: 'none' }, paint: {
+        'fill-extrusion-color': ['interpolate', ['linear'], ['get', 'u'], 0, '#3bd4ff', 15, '#7cf29c', 30, '#ffd23f', 45, '#ff6b3d'],
+        'fill-extrusion-base': ['get', 'u'],
+        'fill-extrusion-height': ['get', 'top'],
+        'fill-extrusion-opacity': 0.85,
       } })
       map.addLayer({ id: 'fence', type: 'line', source: 'fence', paint: { 'line-color': '#ef4a3c', 'line-width': 2, 'line-dasharray': [4, 3], 'line-opacity': 0.8 } })
       map.addLayer({ id: 'survey-fill', type: 'fill', source: 'survey', filter: ['==', ['geometry-type'], 'Polygon'], paint: { 'fill-color': '#3a78f2', 'fill-opacity': 0.12 } })
@@ -229,6 +246,24 @@ export function MapView() {
       const v = station.vox
       if (!o || !v.e.length) {
         src('voxels')?.setData(EMPTY)
+        src('voxels3d')?.setData(EMPTY)
+        return
+      }
+      if (station.map3d) {
+        // Blocos do tamanho do voxel; o chão fica de fora (o satélite já mostra).
+        const h = station.voxelM / 2
+        const blocks: GeoJSON.Feature[] = []
+        for (let i = v.e.length - 1; i >= 0 && blocks.length < MAX_BLOCKS; i--) {
+          if (v.cls[i] === 0) continue
+          const c = station.voxelLatLon(i)
+          const ring = [[-h, -h], [h, -h], [h, h], [-h, h], [-h, -h]].map(([de, dn]) => {
+            const p = enuToLatLon(c, de, dn)
+            return [p.lon, p.lat]
+          })
+          const u = v.u[i] * station.voxelM
+          blocks.push({ type: 'Feature', properties: { u, top: u + station.voxelM }, geometry: { type: 'Polygon', coordinates: [ring] } })
+        }
+        src('voxels3d')?.setData({ type: 'FeatureCollection', features: blocks })
         return
       }
       const feats: GeoJSON.Feature[] = []
@@ -247,6 +282,32 @@ export function MapView() {
     }
     const voxTimer = setInterval(flushVoxels, 1000)
 
+    // ---- geocerca por polígonos ----
+    const fenceFeatures = (f: FenceData, draft: boolean): GeoJSON.Feature[] => {
+      const ring = (pts: { lat: number; lon: number }[]) => [...pts, pts[0]].map((p) => [p.lon, p.lat])
+      return [
+        ...f.inclusion.map((p) => ({ kind: 'inclusion', ring: ring(p) })),
+        ...f.exclusion.map((p) => ({ kind: 'exclusion', ring: ring(p) })),
+        ...f.circles_inclusion.map((c) => ({ kind: 'inclusion', ring: circle(c, c.radius, 64) })),
+        ...f.circles_exclusion.map((c) => ({ kind: 'exclusion', ring: circle(c, c.radius, 64) })),
+      ].map(({ kind, ring }) => ({ type: 'Feature', properties: { kind, draft }, geometry: { type: 'Polygon', coordinates: [ring] } }))
+    }
+    const onFence = () => {
+      if (!loaded) return
+      const planning = station.view === 'plan'
+      const vf = station.vehicleFence
+      const feats = vf ? fenceFeatures(vf, false) : []
+      // Planejando: o rascunho aparece tracejado quando difere do que está no veículo.
+      if (planning && !fenceIsEmpty(station.fenceDraft) && !sameFence(station.fenceDraft, vf)) feats.push(...fenceFeatures(station.fenceDraft, true))
+      src('fenceareas')?.setData({ type: 'FeatureCollection', features: feats })
+      const d = station.drawing
+      const dfeats: GeoJSON.Feature[] = d ? [
+        ...(d.pts.length > 1 ? [{ type: 'Feature' as const, properties: {}, geometry: { type: 'LineString' as const, coordinates: [...d.pts, ...(d.pts.length > 2 ? [d.pts[0]] : [])].map((p) => [p.lon, p.lat]) } }] : []),
+        ...d.pts.map((p) => ({ type: 'Feature' as const, properties: {}, geometry: { type: 'Point' as const, coordinates: [p.lon, p.lat] } })),
+      ] : []
+      src('drawing')?.setData({ type: 'FeatureCollection', features: dfeats })
+    }
+
     // ---- geocerca (dos parâmetros do veículo) ----
     const onParams = () => {
       const t = station.telem
@@ -256,10 +317,33 @@ export function MapView() {
       src('fence')?.setData(t?.home && r && on !== 0 ? { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: circle(t.home, r) } } : EMPTY)
     }
 
+    // ---- 3D: inclina o mapa e libera a rotação (dois dedos no tablet, botão direito no mouse) ----
+    let is3d = false
+    const set3d = (on: boolean) => {
+      is3d = on
+      if (on) {
+        map.dragRotate.enable()
+        map.touchZoomRotate.enableRotation()
+        map.touchPitch.enable()
+        map.easeTo({ pitch: 60, duration: 600 })
+      } else {
+        map.dragRotate.disable()
+        map.touchZoomRotate.disableRotation()
+        map.touchPitch.disable()
+        map.easeTo({ pitch: 0, bearing: 0, duration: 600 })
+      }
+      onMap(true)
+    }
+
     const onUi = () => {
-      if (loaded) map.setLayoutProperty('voxels', 'visibility', station.lidarLayer ? 'visible' : 'none')
-      map.getCanvas().style.cursor = station.view === 'plan' && station.addMode ? 'crosshair' : ''
+      if (loaded) {
+        map.setLayoutProperty('voxels', 'visibility', station.lidarLayer && !station.map3d ? 'visible' : 'none')
+        map.setLayoutProperty('voxels3d', 'visibility', station.lidarLayer && station.map3d ? 'visible' : 'none')
+      }
+      if (station.map3d !== is3d) set3d(station.map3d)
+      map.getCanvas().style.cursor = station.view === 'plan' && (station.addMode || station.drawing) ? 'crosshair' : ''
       onMission()
+      onFence()
     }
 
     map.on('dragstart', () => {
@@ -269,7 +353,9 @@ export function MapView() {
       }
     })
     map.on('click', (e: MapMouseEvent) => {
-      if (station.view !== 'plan' || !station.addMode) return
+      if (station.view !== 'plan') return
+      if (station.drawing) return station.addDrawPoint({ lat: e.lngLat.lat, lon: e.lngLat.lng })
+      if (!station.addMode) return
       const alt = station.settings.wpAlt
       station.setPlan([...station.plan, { lat: e.lngLat.lat, lon: e.lngLat.lng, alt }], station.plan.length)
     })
@@ -303,6 +389,7 @@ export function MapView() {
       station.subscribe('payload', onPayloadAll),
       station.subscribe('telemetry', onTelemetry),
       station.subscribe('mission', onMission),
+      station.subscribe('fence', onFence),
       station.subscribe('map', () => onMap()),
       station.subscribe('params', onParams),
       station.subscribe('ui', onUi),

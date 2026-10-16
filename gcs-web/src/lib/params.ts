@@ -167,7 +167,7 @@ export function rtlAltParam(cls: VehicleClass): [string, number] {
 
 /** Tudo o que a interface lê ao conectar num veículo deste tipo. */
 export function paramIdsFor(cls: VehicleClass): string[] {
-  const ids = new Set<string>(['BATT_LOW_MAH', 'FENCE_ENABLE', 'FENCE_RADIUS', 'AVOID_ENABLE', 'AVOID_DIST_MAX', 'RCMAP_THROTTLE', rtlAltParam(cls)[0]])
+  const ids = new Set<string>(['BATT_LOW_MAH', 'FENCE_ENABLE', 'FENCE_RADIUS', 'FENCE_TYPE', 'AVOID_ENABLE', 'AVOID_DIST_MAX', 'RCMAP_THROTTLE', rtlAltParam(cls)[0]])
   for (const c of [...safetyCards(cls), ...flightCards(cls)]) for (const f of c.fields) ids.add(f.id)
   return [...ids]
 }

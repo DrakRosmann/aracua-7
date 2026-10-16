@@ -23,6 +23,9 @@ sem alteração a partir do computador de bordo (`ros2_ws/`, nó `map_link`).
 | `vehicle_mission` | ao achar o veículo, a novos clientes, depois de cada envio e de cada `mission_download` | missão como está no veículo: `items` (`{lat, lon, alt, drop?}`), `wp_seq`, `rtl_at_end`, `land_at_end`, `ignored` (itens que a estação não representa), `count` |
 | `replay`          | 2 Hz durante a reprodução e a cada comando `replay` | `file`, `t` e `duration` (s), `speed`, `paused` |
 | `calib`           | durante calibrações        | `kind: "accel"` com `status` (`position`, `success`, `failed`) e `position` (1–6); `kind: "compass"` com `compass`, `pct`, `attempt`, `status`; `kind: "compass_report"` com `compass`, `fitness`, `autosaved`, `status` |
+| `vehicle_fence`   | ao ler a geocerca do veículo (depois da missão, ao conectar) e depois de cada envio | `inclusion` e `exclusion` (listas de polígonos `[{lat, lon}]`), `circles_inclusion` e `circles_exclusion` (`{lat, lon, radius}`) |
+| `fence_upload`    | fim do envio da geocerca   | `ok`, `result`, `count` |
+| `maintenance`     | ao conectar, a cada 10 s, no fim de cada voo e depois de cada comando de manutenção | registro de manutenção: totais, `batteries`, `active_battery`, `tasks` (com `since_h`, `since_flights`, `used`, `due`), `history`, `notes`, `flying_s` |
 | `map_reset`       | mapa zerado                | — |
 | `error`           | comando inválido ou recusado | `message`; recusas do pré-voo começam com `pré-voo (decolar)` ou `pré-voo (iniciar missão)` |
 | `payload`         | ao conectar, 2 Hz, 10 Hz durante a contagem e a cada mudança | estado do sistema de entrega (ver `PayloadState` em `types.ts`) |
@@ -43,6 +46,12 @@ sem alteração a partir do computador de bordo (`ros2_ws/`, nó `map_link`).
 | `calibrate`       | `kind`: `gyro`, `accel`, `level`, `compass`, `compass_accept`, `compass_cancel` | `MAV_CMD_PREFLIGHT_CALIBRATION` (giro, acelerômetro 6 posições, nivelar); `MAV_CMD_DO_START_MAG_CAL` / `ACCEPT` / `CANCEL`; só desarmado |
 | `accel_pos`       | `position` (1–6) | `MAV_CMD_ACCELCAL_VEHICLE_POS`: confirma a posição pedida pelo veículo |
 | `reboot`          | — | `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`; só desarmado |
+| `fence_upload`    | `fence` (formato de `vehicle_fence`), `enable?` (padrão true) | protocolo de missão com `mission_type = FENCE`: um item `NAV_FENCE_POLYGON_VERTEX_INCLUSION/EXCLUSION` por vértice (param1 = nº de vértices) e `NAV_FENCE_CIRCLE_*` (param1 = raio); `FENCE_TYPE \|= 4` e `FENCE_ENABLE = 1` |
+| `fence_download`  | — | REQUEST_LIST/REQUEST_INT com `mission_type = FENCE`; responde com `vehicle_fence` |
+| `maintenance_get` | — | pede um `maintenance` |
+| `maintenance_config` | `airframe`, `batteries` (`id`, `name`, `cycles`, `max_cycles`, `retired`), `active_battery`, `tasks` (`id`, `name`, `every_h`, `every_flights`) | substitui a configuração (totais e histórico ficam) |
+| `maintenance_done`| `task`, `note?` | zera a contagem da tarefa e anota |
+| `maintenance_note`| `text` | anotação livre |
 | `manual`          | `x, y, z, r` em −1…1 (z em 0…1) | `MANUAL_CONTROL` |
 | `param_get`       | `id` | `PARAM_REQUEST_READ` |
 | `param_set`       | `id`, `value` | `PARAM_SET` |

@@ -303,8 +303,10 @@ pub enum Outcome {
     Done { ok: bool, result: String, count: u16, wp_seq: Vec<u16> },
 }
 
+/// Envio de itens pelo protocolo de missão. `mtype` separa missão, geocerca e pontos de pouso.
 #[derive(Default)]
 pub struct Uploader {
+    mtype: MavMissionType,
     items: Vec<MISSION_ITEM_INT_DATA>,
     active: bool,
     last_activity: Option<Instant>,
@@ -313,6 +315,10 @@ pub struct Uploader {
 }
 
 impl Uploader {
+    pub fn new(mtype: MavMissionType) -> Self {
+        Self { mtype, ..Default::default() }
+    }
+
     pub fn start(&mut self, link: &Link, built: Built) {
         self.items = built.items;
         self.wp_seq = built.wp_seq;
@@ -331,6 +337,7 @@ impl Uploader {
             count: self.items.len() as u16,
             target_system: ts,
             target_component: tc,
+            mission_type: self.mtype,
             ..Default::default()
         }));
         self.last_activity = Some(Instant::now());
@@ -346,9 +353,9 @@ impl Uploader {
             return Outcome::InProgress;
         }
         let seq = match msg {
-            MavMessage::MISSION_REQUEST_INT(r) => Some(r.seq),
-            MavMessage::MISSION_REQUEST(r) => Some(r.seq),
-            MavMessage::MISSION_ACK(a) => {
+            MavMessage::MISSION_REQUEST_INT(r) if r.mission_type == self.mtype => Some(r.seq),
+            MavMessage::MISSION_REQUEST(r) if r.mission_type == self.mtype => Some(r.seq),
+            MavMessage::MISSION_ACK(a) if a.mission_type == self.mtype => {
                 self.active = false;
                 let ok = a.mavtype == MavMissionResult::MAV_MISSION_ACCEPTED;
                 return Outcome::Done { ok, result: format!("{:?}", a.mavtype), count: self.items.len() as u16, wp_seq: self.wp_seq.clone() };
@@ -389,6 +396,7 @@ pub enum Download {
 
 #[derive(Default)]
 pub struct Downloader {
+    mtype: MavMissionType,
     active: bool,
     count: Option<u16>,
     items: Vec<MISSION_ITEM_INT_DATA>,
@@ -401,8 +409,12 @@ impl Downloader {
         self.active
     }
 
+    pub fn new(mtype: MavMissionType) -> Self {
+        Self { mtype, ..Default::default() }
+    }
+
     pub fn start(&mut self, link: &Link) {
-        *self = Self { active: true, ..Default::default() };
+        *self = Self { mtype: self.mtype, active: true, ..Default::default() };
         self.request(link);
     }
 
@@ -412,13 +424,13 @@ impl Downloader {
             None => link.send(&MavMessage::MISSION_REQUEST_LIST(MISSION_REQUEST_LIST_DATA {
                 target_system: ts,
                 target_component: tc,
-                ..Default::default()
+                mission_type: self.mtype,
             })),
             Some(_) => link.send(&MavMessage::MISSION_REQUEST_INT(MISSION_REQUEST_INT_DATA {
                 seq: self.items.len() as u16,
                 target_system: ts,
                 target_component: tc,
-                ..Default::default()
+                mission_type: self.mtype,
             })),
         }
         self.last_activity = Some(Instant::now());
@@ -431,6 +443,7 @@ impl Downloader {
             target_system: ts,
             target_component: tc,
             mavtype: MavMissionResult::MAV_MISSION_ACCEPTED,
+            mission_type: self.mtype,
             ..Default::default()
         }));
         Download::Done(Ok(std::mem::take(&mut self.items)))
@@ -441,7 +454,7 @@ impl Downloader {
             return Download::InProgress;
         }
         match msg {
-            MavMessage::MISSION_COUNT(c) if self.count.is_none() && c.mission_type == MavMissionType::MAV_MISSION_TYPE_MISSION => {
+            MavMessage::MISSION_COUNT(c) if self.count.is_none() && c.mission_type == self.mtype => {
                 self.count = Some(c.count);
                 self.retries = 0;
                 if c.count == 0 {
@@ -449,7 +462,7 @@ impl Downloader {
                 }
                 self.request(link);
             }
-            MavMessage::MISSION_ITEM_INT(it) if self.count.is_some() && it.seq as usize == self.items.len() => {
+            MavMessage::MISSION_ITEM_INT(it) if self.count.is_some() && it.mission_type == self.mtype && it.seq as usize == self.items.len() => {
                 self.items.push(it.clone());
                 self.retries = 0;
                 if self.items.len() as u16 == self.count.unwrap() {

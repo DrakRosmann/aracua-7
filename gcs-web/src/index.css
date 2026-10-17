@@ -378,6 +378,29 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid rgb(var(--ink) / 0.5
 @media (max-width: 1280px) { .ems { left: auto; right: 16px; transform: none; top: 60px; max-width: calc(100% - 110px); z-index: 9; } }
 @media (max-width: 760px) { .ems { left: 66px; right: 10px; top: 54px; width: auto; min-width: 0; max-width: none; } .ems-main { grid-template-columns: 110px minmax(0, 1fr); } .ems-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 
+/* Controle de videogame */
+.padst { border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-bottom: 10px; }
+.padst.on .tog { color: var(--green); }
+.padst .hint b { font-weight: 500; }
+.padm { position: relative; display: inline-block; width: 100%; min-width: 60px; height: 6px; border-radius: 3px; background: rgb(var(--ink) / 0.12); overflow: hidden; vertical-align: middle; }
+.padm::after { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: rgb(var(--ink) / 0.35); }
+.padm.u::after { display: none; }
+.padm i { position: absolute; top: 0; bottom: 0; background: var(--blue-2); }
+.padhold { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center; font-size: 12px; color: var(--amber); margin-top: 6px; }
+.padhold .padm i { background: var(--amber); }
+.padout { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 12px; margin-top: 8px; font-size: 11px; color: var(--muted); }
+.padout span { display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 6px; }
+.padtab { border-collapse: collapse; font-size: 13px; margin-bottom: 8px; }
+.padtab th { text-align: left; font-weight: 400; color: var(--muted); padding: 4px 12px 4px 0; }
+.padtab tbody th { color: var(--fg); }
+.padtab td { padding: 4px 12px 4px 0; }
+.padtab td:nth-child(4) { width: 160px; }
+.padtab select { background: var(--input); border: 1px solid rgb(var(--ink) / 0.14); border-radius: 4px; padding: 4px 6px; font-size: 12.5px; }
+.padbtns { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 14px; }
+.padbtns label { display: grid; grid-template-columns: 110px minmax(0, 1fr); align-items: center; gap: 8px; font-size: 12.5px; padding: 3px 6px; border-radius: 4px; border: 1px solid transparent; }
+.padbtns label.hit { border-color: var(--green); background: rgba(47, 207, 95, 0.12); }
+.padbtns select { background: var(--input); border: 1px solid rgb(var(--ink) / 0.14); border-radius: 4px; padding: 4px 6px; font-size: 12.5px; min-width: 0; }
+
 @media (max-width: 1100px) { #cvRadar, .ftime { display: none; } }
 @media (max-width: 760px) {
   .tb .lbl, .tb.act .lbl, .stat small { display: none; }

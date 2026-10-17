@@ -9,6 +9,7 @@ import { Calibration } from '../components/Calibration'
 import { OfflineMap } from '../components/OfflineMap'
 import { MaintenanceView } from '../components/Maintenance'
 import { EngineSetup } from '../components/Engine'
+import { PadSetup } from '../components/Gamepad'
 import { flightCards, rtlAltParam, safetyCards, type PCard, type PField } from '../lib/params'
 import { t, tk } from '../lib/i18n'
 import { classLabel, vehicleClass } from '../types'
@@ -187,6 +188,7 @@ const PAGES = [
   { id: 'voo', label: tk('Parâmetros de voo') },
   { id: 'cal', label: tk('Calibração') },
   { id: 'motor', label: tk('Motor') },
+  { id: 'controle', label: tk('Controle') },
   { id: 'entrega', label: tk('Entrega') },
   { id: 'manut', label: tk('Manutenção') },
   { id: 'estacao', label: tk('Estação') },
@@ -221,6 +223,7 @@ export function SetupView() {
         )}
         {page === 'cal' && <Calibration />}
         {page === 'motor' && <EngineSetup />}
+        {page === 'controle' && <PadSetup />}
         {page === 'entrega' && <DeliverySetup />}
         {page === 'manut' && <MaintenanceView />}
         {page === 'estacao' && <StationSettings />}

@@ -38,6 +38,7 @@ export default function App() {
   useEffect(() => {
     if (isDesktop) station.initDesktop()
     else station.connect()
+    station.startPad()
   }, [])
   const v = station.view
   return (

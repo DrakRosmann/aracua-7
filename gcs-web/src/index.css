@@ -401,6 +401,48 @@ kbd { font: 11px ui-monospace, monospace; border: 1px solid rgb(var(--ink) / 0.5
 .padbtns label.hit { border-color: var(--green); background: rgba(47, 207, 95, 0.12); }
 .padbtns select { background: var(--input); border: 1px solid rgb(var(--ink) / 0.14); border-radius: 4px; padding: 4px 6px; font-size: 12.5px; min-width: 0; }
 
+/* Piloto automático (MCP): painel sempre escuro, valores em ciano, modos ativos em verde */
+.rb.apon:not(.on) { color: var(--green); }
+.mcp { position: absolute; left: 50%; bottom: 182px; transform: translateX(-50%); width: 780px; max-width: calc(100% - 120px); z-index: 9; background: var(--panel); border-radius: 4px; box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35); backdrop-filter: blur(6px); border-top: 3px solid transparent; }
+.mcp.engaged { border-top-color: var(--green); }
+.mcp.alarm { border-top-color: #ef4a3c; animation: mcpalarm 0.5s steps(2) 10; }
+@keyframes mcpalarm { 50% { box-shadow: 0 0 0 3px rgba(239, 74, 60, 0.7); } }
+.mcp .rp-h { gap: 10px; }
+.mcp-chev { display: inline-block; font-size: 11px; transition: transform 0.15s; }
+.mcp.collapsed .mcp-chev { transform: rotate(180deg); }
+.fma { margin-left: auto; display: grid; grid-template-columns: 80px 92px 150px 64px; background: #050607; border: 1px solid #2a2e35; border-radius: 3px; font: 500 12.5px ui-monospace, 'Roboto Mono', monospace; letter-spacing: 0.04em; text-transform: none; }
+.fma span { padding: 3px 8px; color: #2fcf5f; border-left: 1px solid #2a2e35; white-space: nowrap; overflow: hidden; }
+.fma span:first-child { border-left: 0; }
+.fma em { font-style: normal; color: #e8ecf1; margin-left: 8px; }
+.fma .ap { color: #6b7380; text-align: center; }
+.fma .ap.on { color: #2fcf5f; }
+.fma .ap.off { color: #16181c; background: #f5b43a; animation: blink 0.5s steps(2) infinite; }
+.mcp-face { display: flex; gap: 6px; padding: 10px; margin: 0 6px 6px; background: #1b1e23; border: 1px solid #2c3037; border-radius: 6px; color: #e8ecf1; justify-content: space-between; }
+.mcp-w { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; }
+.mcp-l { font-size: 10.5px; letter-spacing: 0.1em; color: #aab2bd; }
+.mcp-knob { display: flex; align-items: stretch; background: #050607; border: 1px solid #343941; border-radius: 4px; overflow: hidden; }
+.mcp-knob > button:not(.mcp-v) { border: 0; background: #2a2e35; color: #e8ecf1; width: 24px; font-size: 16px; cursor: pointer; }
+.mcp-knob > button:not(.mcp-v):hover { background: #3a3f47; }
+.mcp-v { width: 64px; border: 0; background: #050607; color: #36c9f0; font: 500 19px ui-monospace, 'Roboto Mono', monospace; text-align: center; padding: 3px 0; cursor: text; font-variant-numeric: tabular-nums; }
+input.mcp-v { outline: 1px solid #36c9f0; }
+.mcp-bs { display: flex; gap: 4px; align-items: center; min-height: 30px; }
+.mcp-b { position: relative; min-width: 50px; padding: 9px 8px 6px; border: 1px solid #3a3f47; border-radius: 3px; background: #2a2e35; color: #e8ecf1; font: 600 11.5px var(--f); letter-spacing: 0.06em; cursor: pointer; }
+.mcp-b::before { content: ''; position: absolute; left: 8px; right: 8px; top: 3px; height: 3px; border-radius: 2px; background: #3f444c; }
+.mcp-b.on::before { background: #2fcf5f; box-shadow: 0 0 6px #2fcf5f; }
+.mcp-b:disabled { opacity: 0.45; cursor: default; }
+.mcp-note { font-size: 10.5px; color: #8d96a3; }
+.mcp-w.nav .mcp-b { margin-top: 30px; }
+.mcp-ap { position: relative; width: 70px; height: 62px; border: 1px solid #4a5059; border-radius: 6px; background: #2a2e35; color: #e8ecf1; font: 700 17px var(--f); letter-spacing: 0.08em; cursor: pointer; }
+.mcp-ap i { position: absolute; left: 14px; right: 14px; bottom: 8px; height: 4px; border-radius: 2px; background: #3f444c; }
+.mcp-ap.on { border-color: #2fcf5f; }
+.mcp-ap.on i { background: #2fcf5f; box-shadow: 0 0 8px #2fcf5f; }
+.mcp-ap:disabled { opacity: 0.45; cursor: default; }
+.mcp-hint { margin: 0 12px 8px; font-size: 11.5px; color: var(--muted); }
+.mcp-hint b { color: var(--red); font-weight: 500; }
+.mcp-empty { margin: 8px 12px 10px; color: var(--muted); font-size: 12.5px; }
+@media (max-width: 1100px) { .mcp { bottom: 140px; } .fma { grid-template-columns: 70px 84px 130px 60px; } }
+@media (max-width: 760px) { .mcp { left: 10px; right: 10px; width: auto; max-width: none; transform: none; bottom: 120px; } .mcp-face { flex-wrap: wrap; justify-content: center; } .fma { display: none; } }
+
 @media (max-width: 1100px) { #cvRadar, .ftime { display: none; } }
 @media (max-width: 760px) {
   .tb .lbl, .tb.act .lbl, .stat small { display: none; }

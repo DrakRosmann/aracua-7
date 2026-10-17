@@ -156,6 +156,26 @@ impl Link {
         }));
     }
 
+    /// COMMAND_INT, para os comandos que o ArduPilot só aceita nele (os GUIDED_CHANGE_* do avião).
+    pub fn command_int(&self, command: MavCmd, frame: MavFrame, p: [f32; 4], z: f32) {
+        let (ts, tc) = self.target();
+        self.send(&MavMessage::COMMAND_INT(COMMAND_INT_DATA {
+            param1: p[0],
+            param2: p[1],
+            param3: p[2],
+            param4: p[3],
+            x: 0,
+            y: 0,
+            z,
+            command,
+            target_system: ts,
+            target_component: tc,
+            frame,
+            current: 0,
+            autocontinue: 0,
+        }));
+    }
+
     pub fn heartbeat(&self) {
         self.send(&MavMessage::HEARTBEAT(HEARTBEAT_DATA {
             custom_mode: 0,

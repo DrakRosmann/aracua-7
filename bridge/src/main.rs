@@ -3,6 +3,7 @@
 // MAVLink (REQUEST_DATA_STREAM, MISSION_REQUEST, frames *_INT, MOUNT_CONTROL).
 #![allow(deprecated)]
 
+mod autopilot;
 mod commands;
 mod link;
 mod maintenance;
@@ -86,6 +87,7 @@ pub struct Shared {
     pub fence_pending: Mutex<Option<fence::Fence>>,
     pub payload: Mutex<payload::Payload>,
     pub maintenance: Mutex<maintenance::Maintenance>,
+    pub autopilot: Mutex<autopilot::Autopilot>,
     pub tx: broadcast::Sender<Out>,
     pub clients: AtomicUsize,
     map_history: Mutex<(Vec<Arc<Vec<u8>>>, usize)>,
@@ -364,7 +366,23 @@ async fn periodic(shared: Arc<Shared>) {
                 shared.emit_maintenance();
             }
         }
+        // Piloto automático a 5 Hz.
+        if tick.is_multiple_of(2) && !shared.link.is_replay() {
+            let params = shared.state.lock().unwrap().params.clone();
+            let (acts, off) = {
+                let mut ap = shared.autopilot.lock().unwrap();
+                let was = ap.engaged;
+                let acts = ap.step(&snap, &params, now_ms());
+                (acts, if was && !ap.engaged { ap.message.clone() } else { None })
+            };
+            commands::run_autopilot(&shared, &acts);
+            if let Some(why) = off {
+                tracing::warn!("piloto automático desligado: {why}");
+                shared.emit(json!({"type":"error","message":format!("piloto automático desligado: {why}")}));
+            }
+        }
         let mut v = serde_json::to_value(&snap).unwrap_or_default();
+        v["ap"] = serde_json::to_value(&*shared.autopilot.lock().unwrap()).unwrap_or_default();
         v["type"] = json!("telemetry");
         v["t"] = json!(now_ms());
         shared.emit(v);
@@ -559,6 +577,7 @@ async fn main() -> anyhow::Result<()> {
         fence_pending: Mutex::new(None),
         payload: Mutex::new(payload::Payload::load(Some(args.payload_file.clone()))),
         maintenance: Mutex::new(maintenance::Maintenance::load(Some(args.maintenance_file.clone()))),
+        autopilot: Mutex::new(Default::default()),
         tx,
         clients: AtomicUsize::new(0),
         map_history: Mutex::new((Vec::new(), 0)),

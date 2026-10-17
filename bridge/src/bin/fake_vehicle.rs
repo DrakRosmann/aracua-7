@@ -219,6 +219,12 @@ struct Vehicle {
     mode: u32,
     target_alt: f64,
     guided_target: Option<(f64, f64)>,
+    /// GUIDED do avião: rumo, ritmo de subida (0 = livre) e velocidade pedidos pelos GUIDED_CHANGE_*.
+    guided_hdg: Option<f64>,
+    guided_rate: f64,
+    guided_speed: Option<f64>,
+    /// GUIDED do multirrotor: velocidade NED, rumo e quando chegou (o ArduCopter para em 3 s sem novidade).
+    guided_vel: Option<(f64, f64, f64, f64, Instant)>,
     mission: Vec<MISSION_ITEM_INT_DATA>,
     /// Geocerca recebida (itens) e já interpretada.
     fence_items: Vec<MISSION_ITEM_INT_DATA>,
@@ -278,6 +284,10 @@ impl Vehicle {
             "AUTO" => self.cur = 1,
             "GUIDED" => {
                 self.guided_target = None;
+                self.guided_hdg = None;
+                self.guided_rate = 0.0;
+                self.guided_speed = None;
+                self.guided_vel = None;
                 self.target_alt = self.alt;
             }
             "LOITER" | "CIRCLE" | "CRUISE" | "FBWB" => self.target_alt = self.alt,
@@ -405,7 +415,7 @@ fn main() -> anyhow::Result<()> {
     let v = Arc::new(Mutex::new(Vehicle {
         class, airspeed: 0.0, orbit: None, leg_start: (0.0, 0.0), accel_step: None, mag_cal: None,
         e: 0.0, n: 0.0, alt: 0.0, ve: 0.0, vn: 0.0, vz: 0.0, hdg: 48.0, roll: 0.0, pitch: 0.0, yaw_rate: 0.0,
-        armed: false, mode: modes::mode_number(class, start_mode).unwrap_or(0), target_alt: 0.0, guided_target: None, mission: vec![], fence_items: vec![], fence: Default::default(), incoming: None, cur: 0,
+        armed: false, mode: modes::mode_number(class, start_mode).unwrap_or(0), target_alt: 0.0, guided_target: None, guided_hdg: None, guided_rate: 0.0, guided_speed: None, guided_vel: None, mission: vec![], fence_items: vec![], fence: Default::default(), incoming: None, cur: 0,
         manual: (0.0, 0.0, 0.5, 0.0, Instant::now()), used_mah: 0.0, current: 0.0, load: 0.0, gen_a: 0.0, propulsion: args.propulsion, landed_t: 0.0, params,
         texts: vec![], boot: Instant::now(), servo: [0; 16], relay: [false; 8],
         present: [true, true, true, true, false, false], refill_at: [None; 6], loiter_until: None,
@@ -451,6 +461,28 @@ fn main() -> anyhow::Result<()> {
             let Ok((_, msg)) = conn.recv() else { continue };
             let mut s = v.lock().unwrap();
             match msg {
+                // Comandos do piloto automático do avião (ArduPlane 4.5+): só valem em GUIDED.
+                MavMessage::COMMAND_INT(c) if matches!(c.command, MavCmd::MAV_CMD_GUIDED_CHANGE_HEADING | MavCmd::MAV_CMD_GUIDED_CHANGE_ALTITUDE | MavCmd::MAV_CMD_GUIDED_CHANGE_SPEED) => {
+                    let ok = s.class.fixed_wing() && s.is("GUIDED");
+                    if ok {
+                        match c.command {
+                            MavCmd::MAV_CMD_GUIDED_CHANGE_HEADING => s.guided_hdg = Some(c.param2 as f64),
+                            MavCmd::MAV_CMD_GUIDED_CHANGE_ALTITUDE => {
+                                s.target_alt = c.z as f64;
+                                s.guided_rate = c.param3.max(0.0) as f64;
+                            }
+                            _ => s.guided_speed = (c.param2 > 0.0).then_some(c.param2 as f64),
+                        }
+                    }
+                    drop(s);
+                    ack(&send, c.command, ok);
+                    continue;
+                }
+                MavMessage::SET_POSITION_TARGET_LOCAL_NED(t) => {
+                    if !s.class.fixed_wing() && s.is("GUIDED") {
+                        s.guided_vel = Some((t.vx as f64, t.vy as f64, t.vz as f64, (t.yaw as f64).to_degrees(), Instant::now()));
+                    }
+                }
                 MavMessage::COMMAND_LONG(c) => match c.command {
                     MavCmd::MAV_CMD_COMPONENT_ARM_DISARM => {
                         let arm = c.param1 > 0.5;
@@ -681,11 +713,23 @@ fn main() -> anyhow::Result<()> {
                             dyaw = mr * 80.0;
                         }
                     }
-                    "GUIDED" => {
-                        let (te, tn) = s.guided_target.unwrap_or((s.e, s.n));
-                        let ta = s.target_alt;
-                        (de, dn, dz, dyaw, _) = goto(&s, te, tn, ta, wp_speed);
-                    }
+                    "GUIDED" => match s.guided_vel {
+                        Some((vn, ve, vd, yaw, at)) if at.elapsed() < Duration::from_secs(3) => {
+                            (de, dn, dz) = (ve, vn, -vd);
+                            dyaw = (wrap(yaw - s.hdg) * 1.5).clamp(-90.0, 90.0);
+                            s.target_alt = s.alt;
+                        }
+                        // Sem alvo novo há 3 s: para onde está, como o ArduCopter.
+                        Some(_) => {
+                            s.guided_vel = None;
+                            s.guided_target = Some((s.e, s.n));
+                        }
+                        None => {
+                            let (te, tn) = s.guided_target.unwrap_or((s.e, s.n));
+                            let ta = s.target_alt;
+                            (de, dn, dz, dyaw, _) = goto(&s, te, tn, ta, wp_speed);
+                        }
+                    },
                     "AUTO" => {
                         let idx = s.cur as usize;
                         match s.mission.get(idx).cloned() {
@@ -1138,7 +1182,20 @@ fn fixed_wing_step(
                     s.say(MavSeverity::MAV_SEVERITY_INFO, "Decolagem concluída, circulando");
                 }
             }
+            "GUIDED" if s.guided_hdg.is_some() => {
+                target_hdg = s.guided_hdg;
+                target_speed = s.guided_speed.unwrap_or(cruise);
+                if s.guided_rate > 0.0 {
+                    climb_cmd = Some(((s.target_alt - s.alt) * 0.35).clamp(-s.guided_rate, s.guided_rate));
+                }
+            }
             "LOITER" | "CIRCLE" | "GUIDED" => {
+                if mode == "GUIDED" {
+                    target_speed = s.guided_speed.unwrap_or(cruise);
+                    if s.guided_rate > 0.0 {
+                        climb_cmd = Some(((s.target_alt - s.alt) * 0.35).clamp(-s.guided_rate, s.guided_rate));
+                    }
+                }
                 let c = match (mode.as_str(), s.guided_target) {
                     ("GUIDED", Some(t)) => t,
                     _ => {

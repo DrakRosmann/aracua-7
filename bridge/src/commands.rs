@@ -96,6 +96,8 @@ pub enum Command {
     /// Tarefa feita agora (zera a contagem dela).
     MaintenanceDone { task: u32, #[serde(default)] note: Option<String> },
     MaintenanceNote { text: String },
+    /// Piloto automático: liga/desliga, modos e valores selecionados (ver autopilot.rs).
+    Autopilot(crate::autopilot::Patch),
 }
 
 /// Comandos que fazem sentido reproduzindo um voo gravado (os outros iriam para lugar nenhum).
@@ -135,6 +137,41 @@ pub fn preflight(t: &crate::state::Telemetry, what: &str) -> Result<(), String> 
 
 fn yes() -> bool {
     true
+}
+
+/// Manda ao veículo o que o piloto automático pediu.
+pub fn run_autopilot(shared: &Shared, acts: &[crate::autopilot::Action]) {
+    use crate::autopilot::Action;
+    let link = &shared.link;
+    for a in acts {
+        match *a {
+            Action::Mode(m) => {
+                if let Err(e) = set_mode(shared, m) {
+                    tracing::warn!("piloto automático: {e}");
+                }
+            }
+            // param1 = HEADING_TYPE_HEADING, param3 = aceleração lateral máxima (~30° de inclinação).
+            Action::Heading(h) => link.command_int(MavCmd::MAV_CMD_GUIDED_CHANGE_HEADING, MavFrame::MAV_FRAME_GLOBAL, [1.0, h, 6.0, 0.0], 0.0),
+            Action::Altitude { alt, rate } => link.command_int(MavCmd::MAV_CMD_GUIDED_CHANGE_ALTITUDE, MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT, [0.0, 0.0, rate, 0.0], alt),
+            // param1 = SPEED_TYPE_AIRSPEED; aceleração 0 = na hora.
+            Action::Airspeed(v) => link.command_int(MavCmd::MAV_CMD_GUIDED_CHANGE_SPEED, MavFrame::MAV_FRAME_GLOBAL, [0.0, v, 0.0, 0.0], 0.0),
+            Action::Velocity { vn, ve, vd, yaw } => {
+                let (ts, tc) = link.target();
+                let ignore = PositionTargetTypemask::POSITION_TARGET_TYPEMASK_X_IGNORE
+                    | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_Y_IGNORE
+                    | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_Z_IGNORE
+                    | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_AX_IGNORE
+                    | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_AY_IGNORE
+                    | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_AZ_IGNORE
+                    | PositionTargetTypemask::POSITION_TARGET_TYPEMASK_YAW_RATE_IGNORE;
+                link.send(&MavMessage::SET_POSITION_TARGET_LOCAL_NED(SET_POSITION_TARGET_LOCAL_NED_DATA {
+                    time_boot_ms: 0, x: 0.0, y: 0.0, z: 0.0, vx: vn, vy: ve, vz: vd, afx: 0.0, afy: 0.0, afz: 0.0,
+                    yaw: yaw.to_radians(), yaw_rate: 0.0, type_mask: ignore, target_system: ts, target_component: tc,
+                    coordinate_frame: MavFrame::MAV_FRAME_LOCAL_NED,
+                }));
+            }
+        }
+    }
 }
 
 pub fn set_mode(shared: &Shared, name: &str) -> Result<(), String> {
@@ -516,6 +553,14 @@ pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
         Command::MaintenanceNote { text } => {
             shared.maintenance.lock().unwrap().add_note(text, now_ms())?;
         }
+        Command::Autopilot(p) => {
+            let (t, class, params) = {
+                let s = shared.state.lock().unwrap();
+                (s.t.clone(), s.class, s.params.clone())
+            };
+            let acts = shared.autopilot.lock().unwrap().command(p, &t, class, &params, now_ms())?;
+            run_autopilot(shared, &acts);
+        }
     }
     if is_maintenance {
         shared.emit_maintenance();
@@ -608,6 +653,8 @@ mod tests {
         assert!(matches!(serde_json::from_str::<Command>(r#"{"cmd":"calibrate","kind":"accel"}"#).unwrap(), Command::Calibrate { .. }));
         assert!(matches!(serde_json::from_str::<Command>(r#"{"cmd":"accel_pos","position":3}"#).unwrap(), Command::AccelPos { position: 3 }));
         let c: Command = serde_json::from_str(r#"{"cmd":"manual","x":0.1,"y":0,"z":0.5,"r":0}"#).unwrap();
+        let c2: Command = serde_json::from_str(r#"{"cmd":"autopilot","engage":true,"hdg":270,"vertical":"vs"}"#).unwrap();
+        assert!(matches!(c2, Command::Autopilot(ref p) if p.engage == Some(true) && p.hdg == Some(270.0) && p.vertical == Some(crate::autopilot::Vertical::Vs)));
         assert!(matches!(c, Command::Manual { .. }));
         assert!(serde_json::from_str::<Command>(r#"{"cmd":"explodir"}"#).is_err());
         let c: Command = serde_json::from_str(r#"{"cmd":"payload_release","slots":[1,3]}"#).unwrap();

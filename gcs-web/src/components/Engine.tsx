@@ -139,13 +139,48 @@ function stats(panel: Panel, s: EngineSettings): [string, string, Level?][] {
   return out
 }
 
-export function EnginePanel() {
-  useChannels('telemetry', 'ui', 'maint')
-  const [collapsed, setCollapsed] = useState(false)
-  if (!station.engineOpen) return null
+/** Mostrador do motor (o "vidro" do EMS), usado no painel flutuante e na aba Painel. */
+export function EngineFace() {
+  useChannels('telemetry', 'maint')
   const tm = station.telem
   const s = station.settings.engine
   const panel = tm?.connected ? buildPanel(tm, s) : null
+  return (
+    <div className="ems-face">
+      {!panel ? <p className="ems-empty">{tr('Sem veículo conectado.')}</p> : (
+        <>
+          {panel.stale && <p className="ems-empty">{panel.kind === 'electric' ? tr('Sem telemetria dos ESCs: mostrando só a bateria.') : tr('Sem dados da EFI (EFI_STATUS). Confira EFI_TYPE e a taxa de telemetria.')}</p>}
+          <div className="ems-main">
+            <div className="ems-dials">{panel.dials.map((m) => <Dial key={m.id} m={m} />)}</div>
+            <div className="ems-bars">
+              {panel.bars.map((m) => <Bar key={m.id} m={m} />)}
+              {panel.cells && <Cells c={panel.cells} />}
+            </div>
+          </div>
+          {panel.generator && <Generator gv={panel.generator} />}
+          {panel.others.length > 0 && (
+            <div className="ems-kvs">
+              {panel.others.map((b) => (
+                <span key={b.id}>{tr('Bateria {n}', { n: b.id + 1 })}{b.function !== 'unknown' && b.function !== 'all' ? ` · ${b.function}` : ''}
+                  <b>{num(b.voltage, 1)} V{b.remaining !== null ? ` · ${b.remaining} %` : ''}</b></span>
+              ))}
+            </div>
+          )}
+          <div className="ems-strip">
+            {stats(panel, s).map(([k, v, lv]) => <span key={k}>{k}<b className={lv ?? ''}>{v}</b></span>)}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+export function EnginePanel() {
+  useChannels('telemetry', 'ui')
+  const [collapsed, setCollapsed] = useState(false)
+  if (!station.engineOpen) return null
+  const tm = station.telem
+  const panel = tm?.connected ? buildPanel(tm, station.settings.engine) : null
   const all = panel ? [...panel.dials, ...panel.bars] : []
   const alarm = all.some((m) => worst(m) === 'crit') ? 'crit' : all.some((m) => worst(m) === 'warn') ? 'warn' : ''
   return (
@@ -155,34 +190,7 @@ export function EnginePanel() {
         {panel && <span className="ems-kind">{tr(KIND_LABEL[panel.kind])}</span>}
         {panel?.state && <span className={`ems-state ${panel.state.level}`}>{panel.state.text}</span>}
       </button>
-      {!collapsed && (
-        <div className="ems-face">
-          {!panel ? <p className="ems-empty">{tr('Sem veículo conectado.')}</p> : (
-            <>
-              {panel.stale && <p className="ems-empty">{panel.kind === 'electric' ? tr('Sem telemetria dos ESCs: mostrando só a bateria.') : tr('Sem dados da EFI (EFI_STATUS). Confira EFI_TYPE e a taxa de telemetria.')}</p>}
-              <div className="ems-main">
-                <div className="ems-dials">{panel.dials.map((m) => <Dial key={m.id} m={m} />)}</div>
-                <div className="ems-bars">
-                  {panel.bars.map((m) => <Bar key={m.id} m={m} />)}
-                  {panel.cells && <Cells c={panel.cells} />}
-                </div>
-              </div>
-              {panel.generator && <Generator gv={panel.generator} />}
-              {panel.others.length > 0 && (
-                <div className="ems-kvs">
-                  {panel.others.map((b) => (
-                    <span key={b.id}>{tr('Bateria {n}', { n: b.id + 1 })}{b.function !== 'unknown' && b.function !== 'all' ? ` · ${b.function}` : ''}
-                      <b>{num(b.voltage, 1)} V{b.remaining !== null ? ` · ${b.remaining} %` : ''}</b></span>
-                  ))}
-                </div>
-              )}
-              <div className="ems-strip">
-                {stats(panel, s).map(([k, v, lv]) => <span key={k}>{k}<b className={lv ?? ''}>{v}</b></span>)}
-              </div>
-            </>
-          )}
-        </div>
-      )}
+      {!collapsed && <EngineFace />}
     </aside>
   )
 }

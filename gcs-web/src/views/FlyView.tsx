@@ -1,12 +1,13 @@
 // Tela de voo: trilho de ações, painel de instrumentos, câmera e mostradores.
 
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { station, useChannels } from '../lib/store'
 import { cardinal, fmtDist, fmtTime } from '../lib/format'
 import { distance } from '../lib/geo'
 import { Icon } from '../components/Icons'
 import { AttitudeTape, Compass, ObstacleRadar, Speedometer } from '../components/Instruments'
 import { Sticks } from '../components/Sticks'
+import { CameraFeed } from '../components/Camera'
 import { PadStatus } from '../components/Gamepad'
 import { AutopilotPanel } from '../components/Autopilot'
 import { CountdownOverlay, DeliveryPanel, ReleaseFlash } from '../components/Delivery'
@@ -174,21 +175,10 @@ function FlyPanel() {
 
 function CameraPip() {
   useChannels('ui')
-  const url = station.settings.videoUrl
   const big = station.videoBig
-  const img = useRef<HTMLImageElement>(null)
-  // Erro vale só para a URL que falhou; trocar o endereço tenta de novo.
-  const [failedUrl, setFailedUrl] = useState<string | null>(null)
-  const err = failedUrl === url
-  const setErr = () => setFailedUrl(url)
-  const isVideo = /\.(m3u8|mp4|webm)(\?|$)/i.test(url)
   return (
     <button className={`pip ${big ? 'big' : ''}`} onClick={() => { station.videoBig = !big; station.emit('ui') }} title={big ? tr('Reduzir') : tr('Ampliar vídeo')}>
-      {url && !err ? (
-        isVideo ? <video src={url} autoPlay muted playsInline onError={setErr} /> : <img ref={img} src={url} alt={tr('Vídeo da câmera')} onError={setErr} />
-      ) : (
-        <span className="novideo">{url ? tr('Sem sinal de vídeo') : tr('Sem vídeo configurado')}</span>
-      )}
+      <CameraFeed />
     </button>
   )
 }
@@ -198,7 +188,7 @@ function FlightTime() {
   return <div className="ftime"><span>{tr('Tempo de voo')}</span><b>{fmtTime(station.stats.flightS)}</b></div>
 }
 
-function Toast() {
+export function Toast() {
   useChannels('log')
   const last = station.log.at(-1)
   const [expired, setExpired] = useState(0)

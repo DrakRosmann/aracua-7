@@ -13,13 +13,14 @@ import type { MaintenanceState } from '../types'
 import { setupTiles, type Bounds } from './tiles'
 import { getLang, setLang, t as tr, tk, type Lang } from './i18n'
 import { AlertTracker, buildPanel, DEFAULT_ENGINE, issues, type EngineSettings } from './engine'
+import { DEFAULT_COCKPIT, type CockpitSettings } from './cockpit'
 import { DEFAULT_PAD, effectiveThrottle, PadButtons, pickPad, readManual, type Manual, type PadAction, type PadSettings, type PadSnapshot } from './gamepad'
 
 // Origens de lançamento que a ponte manda (em português, traduzidas na tela).
 tk('missão'); tk('externo'); tk('estação')
 
 export type Channel = 'telemetry' | 'log' | 'params' | 'mission' | 'map' | 'ui' | 'conn' | 'payload' | 'link' | 'replay' | 'calib' | 'fence' | 'maint' | 'pad'
-export type View = 'fly' | 'plan' | 'setup' | 'analyze'
+export type View = 'fly' | 'plan' | 'setup' | 'analyze' | 'panel'
 
 export interface Settings {
   bridgeUrl: string
@@ -40,6 +41,8 @@ export interface Settings {
   engine: EngineSettings
   /** Controle de videogame: eixos, botões e acelerador. */
   gamepad: PadSettings
+  /** Aba Painel: layout, instrumentos de cada espaço, glareshield e alertas. */
+  cockpit: CockpitSettings
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -56,6 +59,7 @@ const DEFAULT_SETTINGS: Settings = {
   keepTiles: true,
   engine: DEFAULT_ENGINE,
   gamepad: DEFAULT_PAD,
+  cockpit: DEFAULT_COCKPIT,
 }
 
 function loadSettings(): Settings {
@@ -66,6 +70,8 @@ function loadSettings(): Settings {
     if (q) s.bridgeUrl = q
     s.engine = { ...DEFAULT_ENGINE, ...s.engine }
     s.gamepad = { ...DEFAULT_PAD, ...s.gamepad, modes: { ...DEFAULT_PAD.modes, ...s.gamepad?.modes } }
+    s.cockpit = { ...DEFAULT_COCKPIT, ...s.cockpit, slots: { ...DEFAULT_COCKPIT.slots, ...s.cockpit?.slots } }
+    if (!(s.cockpit.layout in DEFAULT_COCKPIT.slots)) s.cockpit.layout = DEFAULT_COCKPIT.layout
     // No app desktop a ponte é local e iniciada pelo próprio app.
     if (isDesktop) s.bridgeUrl = 'ws://127.0.0.1:8765'
     applyLook(s)
@@ -736,6 +742,11 @@ class Station {
       }
       case 'none': break
     }
+  }
+
+  /** O piloto automático desligou sozinho há pouco (luz e "AP OFF" piscando). */
+  apAlarmOn() {
+    return Date.now() - this.apOffAt < 6000
   }
 
   /** Três toques descendentes (o "cavalry charge" do desligamento do piloto automático). */

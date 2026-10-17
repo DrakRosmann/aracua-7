@@ -95,6 +95,15 @@ O que mais a estação faz:
   (rádio, failsafe), ele desliga com alarme sonoro e "AP OFF" piscando. No avião usa os comandos
   `GUIDED_CHANGE_*` do ArduPlane 4.5+; no multirrotor, a ponte manda velocidade e rumo em GUIDED. Detalhes em
   [`docs/protocolo.md`](docs/protocolo.md#piloto-automático).
+* **Painel (pilotagem por instrumentos):** a aba **Painel** vira uma cabine de avião, com:
+  * o piloto automático no glareshield, em cima;
+  * espaços de instrumentos que você troca à vontade (**Trocar instrumentos**);
+  * luzes de alerta (CAS) embaixo: ARMED, LINK, GPS, BATT, SENS, VIBR, ENG, PROX, FENCE e A/P.
+
+  Instrumentos: PFD (horizonte, fitas de velocidade e altitude, variômetro, rumo e FMA), HSI de navegação
+  (ponteiros para o waypoint e para casa), câmera (com HUD opcional), motor (EMS), radar LiDAR, dados de voo e
+  os seis analógicos clássicos (velocímetro, horizonte, altímetro, indicador de curva, giro direcional e
+  variômetro). Layouts de uma a seis telas, salvos neste computador; **F** ou o botão alterna a tela cheia.
 * **Mapa 3D:** o botão **3D** da tela de voo inclina o mapa e mostra os obstáculos do LiDAR como blocos;
   gire com o botão direito do mouse ou com dois dedos.
 * **Tablet:** em telas de toque os botões e campos ficam maiores, e entre 760 e 1180 px os painéis e

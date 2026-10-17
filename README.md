@@ -81,6 +81,13 @@ O que mais a estação faz:
   gerador a bordo (híbrido), mostra rotação, potência, carga da bateria e alarmes. Os limites ficam em
   **Configurar → Motor**; com o veículo armado, o que sai da faixa vai para o log (vermelho também na tela).
   Fontes e nomes dos sensores extras em [`docs/protocolo.md`](docs/protocolo.md#motor-e-energia-telemetrypropulsion).
+* **Controle de videogame:** pilote com um controle de Xbox, 8BitDo, PlayStation ou similar (USB ou
+  Bluetooth), no navegador ou no app. Sticks em modo 2 ou 1, com zona morta e expo; acelerador centrado
+  (multirrotor segura a altitude), incremental (avião) ou pelos gatilhos. Botões configuráveis: armar
+  segurando Start 1,5 s, RTL, pousar, pausar, foto, gimbal e três modos de voo. Os sticks só comandam armado
+  num modo manual; sem foco na janela a estação manda sticks neutros, e se o controle desconectar ela avisa,
+  manda neutro por 1 s e para. Erros vibram o controle. Ajustes e teste ao vivo em **Configurar → Controle**
+  (com **Detectar** para controles fora do layout padrão, como o 8BitDo em modo D-input).
 * **Mapa 3D:** o botão **3D** da tela de voo inclina o mapa e mostra os obstáculos do LiDAR como blocos;
   gire com o botão direito do mouse ou com dois dedos.
 * **Tablet:** em telas de toque os botões e campos ficam maiores, e entre 760 e 1180 px os painéis e

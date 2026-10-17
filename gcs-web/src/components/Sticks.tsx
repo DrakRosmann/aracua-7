@@ -67,7 +67,8 @@ export function Sticks() {
     if (!enabled) return
     const id = setInterval(() => {
       const t = station.telem
-      if (!t?.armed || !MANUAL_MODES[vehicleClass(t)].has(t.mode)) return
+      // O controle de videogame, quando está comandando, tem a vez.
+      if (!t?.armed || !MANUAL_MODES[vehicleClass(t)].has(t.mode) || station.padActive) return
       const k = keys.current
       const kv = (a: string, b: string) => (k[a] ? 1 : 0) - (k[b] ? 1 : 0)
       const { left: L, right: R } = state.current

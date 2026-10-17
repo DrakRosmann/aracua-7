@@ -7,6 +7,7 @@ import { distance } from '../lib/geo'
 import { Icon } from '../components/Icons'
 import { AttitudeTape, Compass, ObstacleRadar, Speedometer } from '../components/Instruments'
 import { Sticks } from '../components/Sticks'
+import { PadStatus } from '../components/Gamepad'
 import { CountdownOverlay, DeliveryPanel, ReleaseFlash } from '../components/Delivery'
 import { EnginePanel } from '../components/Engine'
 import { ForcePrompt, ReplayBar } from '../components/Replay'
@@ -76,9 +77,10 @@ function Val({ label, value, unit }: { label: string; value: string; unit?: stri
 }
 
 function FlyPanel() {
-  useChannels('telemetry', 'params', 'map')
+  useChannels('telemetry', 'params', 'map', 'ui')
+  const tilt = station.gimbalPitch
+  const setTilt = (v: number) => { station.gimbalPitch = v; station.emit('ui') }
   const [collapsed, setCollapsed] = useState(innerWidth < 760 || (innerWidth < 1180 && matchMedia('(pointer: coarse)').matches))
-  const [tilt, setTilt] = useState(-30)
   const t = station.telem
   const home = t?.home
   const dHome = t && home ? distance(home, t) : NaN
@@ -125,7 +127,7 @@ function FlyPanel() {
           </div>
         </Section>
         <Section title={tr('Pilotagem')} icon={<Icon.sticks />}>
-          <div className="db"><Sticks /></div>
+          <div className="db"><PadStatus /><Sticks /></div>
         </Section>
         <Section title={tr('LiDAR')} icon={<Icon.lidar />}>
           <div className="db tight">

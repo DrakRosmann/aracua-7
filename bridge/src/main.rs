@@ -8,6 +8,7 @@ mod link;
 mod maintenance;
 mod mission;
 mod payload;
+mod propulsion;
 mod state;
 
 use aracua_bridge::{apm::MavMessage, fence, mapframe, now_ms};

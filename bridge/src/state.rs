@@ -1,5 +1,6 @@
 //! Estado do veículo montado a partir das mensagens MAVLink.
 
+use crate::propulsion::Propulsion;
 use aracua_bridge::{apm::*, char_array_to_string, modes, now_ms};
 use mavlink::Message;
 use serde::Serialize;
@@ -91,6 +92,8 @@ pub struct Telemetry {
     pub rc_rssi: u8,
     pub msgs_per_sec: f32,
     pub msg_stats: BTreeMap<String, MsgStat>,
+    /// Motor e energia: baterias, ESCs, EFI, gerador e sensores extras.
+    pub propulsion: Propulsion,
 }
 
 /// Eventos pontuais que viram mensagens próprias para a interface.
@@ -125,12 +128,18 @@ impl State {
     pub fn update(&mut self, sys: u8, comp: u8, msg: &MavMessage) -> Option<Event> {
         *self.counts.entry(msg.message_name()).or_insert(0) += 1;
         self.total += 1;
+        // Mensagens de motor/energia; BATTERY_STATUS e NAMED_VALUE_FLOAT seguem adiante.
+        self.t.propulsion.update(msg, now_ms());
         use MavMessage::*;
         match msg {
             HEARTBEAT(h) => {
                 // Só o piloto automático define o estado do veículo.
                 if comp != 1 || h.autopilot == MavAutopilot::MAV_AUTOPILOT_INVALID {
                     return None;
+                }
+                // Outro veículo (ou outro tipo) na mesma ponte: o motor do anterior não vale mais.
+                if self.last_heartbeat_ms != 0 && (self.t.system_id != sys || self.t.vehicle_type != format!("{:?}", h.mavtype).replace("MAV_TYPE_", "")) {
+                    self.t.propulsion = Default::default();
                 }
                 self.last_heartbeat_ms = now_ms();
                 self.t.system_id = sys;
@@ -180,7 +189,7 @@ impl State {
                     == s.onboard_control_sensors_enabled;
             }
             BATTERY_STATUS(b) => {
-                if b.current_consumed >= 0 {
+                if b.id == 0 && b.current_consumed >= 0 {
                     self.t.battery.consumed_mah = b.current_consumed;
                 }
             }
@@ -288,6 +297,7 @@ impl State {
         let age = now.saturating_sub(self.last_heartbeat_ms);
         self.t.heartbeat_age_ms = if self.last_heartbeat_ms == 0 { u64::MAX } else { age };
         self.t.connected = self.last_heartbeat_ms != 0 && age < 3000;
+        self.t.propulsion.refresh(now);
         // Taxas de mensagem recalculadas a cada segundo.
         if now.saturating_sub(self.rates_at_ms) >= 1000 {
             let dt = if self.rates_at_ms == 0 { 1.0 } else { (now - self.rates_at_ms) as f32 / 1000.0 };

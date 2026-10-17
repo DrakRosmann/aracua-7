@@ -87,6 +87,37 @@ A chave fechando de novo marca o compartimento como carregado.
 Lançamentos feitos fora da ponte (itens de missão, outro GCS) são detectados pelo `SERVO_OUTPUT_RAW`
 quando a saída vai para o PWM "solto", e entram no contador com `source` `missão` ou `externo`.
 
+### Motor e energia (`telemetry.propulsion`)
+
+A ponte junta as mensagens de motor e energia do piloto automático em `propulsion` (ver `Propulsion` em
+`types.ts`); a interface monta o painel do motor e as faixas a partir dele.
+
+| Campo | Vem de | Conteúdo |
+|-------|--------|----------|
+| `batteries` | `BATTERY_STATUS` (uma por `id`) | `voltage`, `current` (negativa carregando), `consumed_mah`, `energy_wh`, `remaining`, `temperature`, `cells` (V de cada célula, até 14; vazia se a bateria só manda o total), `time_remaining_s`, `charge_state`, `faults`, `function` |
+| `escs` | `ESC_TELEMETRY_1_TO_4` … `13_TO_16` | por ESC (`n` a partir de 1): `rpm`, `temperature`, `voltage`, `current`, `consumed_mah` |
+| `efi` | `EFI_STATUS` | injeção de motor a pistão ou ECU de turbina: `rpm`, `cht`, `egt`, `fuel_flow` (cm³/min), `fuel_consumed` (cm³), `throttle`, `engine_load`, pressões e temperaturas de admissão, `ignition_voltage`, `fuel_pressure`, `healthy` |
+| `generator` | `GENERATOR_STATUS` | `status` (bits ligados, ex. `generating`, `charging`, `overtemp_fault`), `rpm`, `power_w`, `bus_voltage`, `battery_current`, `load_current`, temperaturas do gerador e do retificador, `runtime_s`, `maintenance_s` |
+| `rpm` | `RPM` | sensores de rotação 1 e 2 |
+| `named` | `NAMED_VALUE_FLOAT`/`INT` | último valor de cada nome (até 64 nomes) |
+
+Valores sem leitura chegam como `null`; cada item traz `age_ms`. ESCs e baterias sem mensagem por 10 s saem
+da lista; EFI, gerador, RPM e valores nomeados, depois de 60 s. Trocar de veículo (outro SYSID ou tipo) zera tudo.
+
+Sensores sem mensagem própria entram por `NAMED_VALUE_FLOAT` (script Lua), com estes nomes:
+
+| Nome | Significado |
+|------|-------------|
+| `CHT1`…`CHT8`, `EGT1`…`EGT8` | temperatura do cabeçote e do escape por cilindro (°C); sem `CHT1`, a da EFI é o cilindro 1 |
+| `H2O` ou `COOLANT` | temperatura da água (°C) |
+| `OILT`, `OILP` | temperatura (°C) e pressão (bar) do óleo |
+| `FUEL` | nível do tanque (%); sem ele, a interface usa o consumo da EFI e a capacidade do tanque configurada |
+| `PUMP_V` | tensão da bomba de combustível da turbina (V) |
+| `TURB_ST` | estado da turbina: 0 desligada, 1 pronta, 2 ignição, 3 acelerando, 4 funcionando, 5 resfriando, 6 falha |
+
+O tipo de motor é detectado assim (ou escolhido em **Configurar → Motor**): `TURB_ST` ou rotação da EFI acima
+de 25 000 rpm → turbina; outra EFI → combustão; senão, elétrico. O gerador aparece em qualquer tipo.
+
 ### Pré-voo e reprodução
 
 Antes de `takeoff` e de `mission_start` no chão, a ponte confere: veículo conectado, GPS com fix 3D e

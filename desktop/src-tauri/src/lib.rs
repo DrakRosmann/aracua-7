@@ -59,6 +59,9 @@ pub enum LinkConfig {
         /// copter, heli, plane ou vtol (padrão: copter).
         #[serde(default)]
         vehicle: Option<String>,
+        /// electric, combustion, jet ou hybrid (padrão: electric).
+        #[serde(default)]
+        propulsion: Option<String>,
     },
     /// Rádio de telemetria ou cabo USB.
     Serial { port: String, baud: u32 },
@@ -102,6 +105,14 @@ fn sim_vehicle(v: &str) -> Result<&'static str, String> {
         .into_iter()
         .find(|k| *k == v)
         .ok_or_else(|| format!("tipo de veículo do simulador inválido: {v:?}"))
+}
+
+/// Motores que o simulador conhece.
+fn sim_propulsion(p: &str) -> Result<&'static str, String> {
+    ["electric", "combustion", "jet", "hybrid"]
+        .into_iter()
+        .find(|k| *k == p)
+        .ok_or_else(|| format!("motor do simulador inválido: {p:?}"))
 }
 
 /// Aceita "host:porta" ou só "porta" (escuta em todas as interfaces).
@@ -351,7 +362,7 @@ fn start_link(app: tauri::AppHandle, sup: State<'_, Supervisor>, config: LinkCon
     capture(&sup.log, "", bridge.stderr.take().unwrap());
     let mut stdin = vec![bridge.stdin.take().unwrap()];
 
-    let sim = if let LinkConfig::Simulator { lat, lon, vehicle } = &config {
+    let sim = if let LinkConfig::Simulator { lat, lon, vehicle, propulsion } = &config {
         let mut args = vec![
             "--mavlink".into(),
             format!("udpout:127.0.0.1:{}", port("ARACUA_SIM_PORT", DEFAULT_SIM_PORT)),
@@ -360,6 +371,9 @@ fn start_link(app: tauri::AppHandle, sup: State<'_, Supervisor>, config: LinkCon
         ];
         if let Some(v) = vehicle {
             args.extend(["--vehicle".into(), sim_vehicle(v)?.into()]);
+        }
+        if let Some(p) = propulsion {
+            args.extend(["--propulsion".into(), sim_propulsion(p)?.into()]);
         }
         if let (Some(lat), Some(lon)) = (lat, lon) {
             args.extend(["--lat".into(), lat.to_string(), "--lon".into(), lon.to_string()]);
@@ -422,7 +436,7 @@ mod tests {
 
     #[test]
     fn urls_da_ponte() {
-        let sim = LinkConfig::Simulator { lat: None, lon: None, vehicle: None };
+        let sim = LinkConfig::Simulator { lat: None, lon: None, vehicle: None, propulsion: None };
         assert_eq!(sim.mavlink_url().unwrap(), "udpin:127.0.0.1:14550");
         let s = LinkConfig::Serial { port: "/dev/ttyUSB0".into(), baud: 57600 };
         assert_eq!(s.mavlink_url().unwrap(), "serial:/dev/ttyUSB0:57600");
@@ -448,9 +462,9 @@ mod tests {
         let c: LinkConfig = serde_json::from_str(r#"{"kind":"serial","port":"/dev/ttyACM0","baud":921600}"#).unwrap();
         assert_eq!(c, LinkConfig::Serial { port: "/dev/ttyACM0".into(), baud: 921600 });
         let c: LinkConfig = serde_json::from_str(r#"{"kind":"simulator"}"#).unwrap();
-        assert_eq!(c, LinkConfig::Simulator { lat: None, lon: None, vehicle: None });
-        let c: LinkConfig = serde_json::from_str(r#"{"kind":"simulator","vehicle":"plane"}"#).unwrap();
-        assert_eq!(c, LinkConfig::Simulator { lat: None, lon: None, vehicle: Some("plane".into()) });
+        assert_eq!(c, LinkConfig::Simulator { lat: None, lon: None, vehicle: None, propulsion: None });
+        let c: LinkConfig = serde_json::from_str(r#"{"kind":"simulator","vehicle":"plane","propulsion":"jet"}"#).unwrap();
+        assert_eq!(c, LinkConfig::Simulator { lat: None, lon: None, vehicle: Some("plane".into()), propulsion: Some("jet".into()) });
     }
 
     #[test]
@@ -458,6 +472,8 @@ mod tests {
         assert_eq!(sim_vehicle("vtol"), Ok("vtol"));
         assert!(sim_vehicle("rover").is_err());
         assert!(sim_vehicle("plane --mavlink x").is_err());
+        assert_eq!(sim_propulsion("hybrid"), Ok("hybrid"));
+        assert!(sim_propulsion("nuclear").is_err());
     }
 
     #[test]

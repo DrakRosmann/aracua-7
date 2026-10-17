@@ -51,6 +51,75 @@ export interface Telemetry {
   rc_rssi: number
   msgs_per_sec: number
   msg_stats: Record<string, { count: number; hz: number }>
+  /** Motor e energia (ver docs/protocolo.md); ausente em pontes antigas. */
+  propulsion?: Propulsion
+}
+
+// ---------- Motor e energia ----------
+
+export interface BatteryPack {
+  id: number
+  /** all, propulsion, avionics, payload ou unknown. */
+  function: string
+  voltage: number
+  /** A; positiva descarregando, negativa carregando. */
+  current: number | null
+  consumed_mah: number | null
+  energy_wh: number | null
+  remaining: number | null
+  temperature: number | null
+  /** Tensão de cada célula; vazia quando só há o total. */
+  cells: number[]
+  time_remaining_s: number | null
+  charge_state: string
+  faults: string[]
+  age_ms: number
+}
+
+export interface EscTelemetry { n: number; rpm: number; temperature: number; voltage: number; current: number; consumed_mah: number; age_ms: number }
+
+/** EFI_STATUS: injeção de motor a pistão ou ECU de turbina; null = sem leitura. */
+export interface EfiStatus {
+  healthy: boolean
+  ecu_index: number | null
+  rpm: number | null
+  fuel_consumed: number | null
+  fuel_flow: number | null
+  engine_load: number | null
+  throttle: number | null
+  cht: number | null
+  egt: number | null
+  intake_pressure: number | null
+  intake_temperature: number | null
+  barometric_pressure: number | null
+  ignition_voltage: number | null
+  fuel_pressure: number | null
+  age_ms: number
+}
+
+export interface GeneratorStatus {
+  /** Bits de MAV_GENERATOR_STATUS_FLAG ligados (ex.: generating, charging). */
+  status: string[]
+  rpm: number | null
+  battery_current: number | null
+  load_current: number | null
+  power_w: number | null
+  bus_voltage: number
+  rectifier_temperature: number | null
+  generator_temperature: number | null
+  runtime_s: number | null
+  maintenance_s: number | null
+  age_ms: number
+}
+
+export interface Propulsion {
+  batteries: BatteryPack[]
+  escs: EscTelemetry[]
+  efi: EfiStatus | null
+  generator: GeneratorStatus | null
+  rpm: [number | null, number | null]
+  /** NAMED_VALUE_FLOAT/INT de scripts: H2O, CHT2, EGT2, OILT, OILP, FUEL, TURB_ST, PUMP_V… */
+  named: Record<string, number>
 }
 
 export type ServerMessage =

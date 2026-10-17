@@ -23,6 +23,7 @@ export const Icon = {
   play: () => <S fill><path d="M7 4.5v15l12-7.5z" /></S>,
   target: () => <S><circle cx="12" cy="12" r="6.5" /><circle cx="12" cy="12" r="1.5" /><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3" /></S>,
   layers: () => <S><path d="M12 3 2.5 8l9.5 5 9.5-5L12 3z" /><path d="M2.5 13l9.5 5 9.5-5" /></S>,
+  engine: () => <S><path d="M4 9h2V7h4V5h4v2h3l2 3h1.5v5H19l-2 3h-6l-2-2H6v-3H4z" /><path d="M2 10.5v4" /></S>,
   plus: () => <S><path d="M12 6v12M6 12h12" /></S>,
   minus: () => <S><path d="M6 12h12" /></S>,
   grid: () => <S><rect x="3.5" y="3.5" width="17" height="17" rx="1" /><path d="M7 7h10v3.3H7v3.4h10V17H7" /></S>,

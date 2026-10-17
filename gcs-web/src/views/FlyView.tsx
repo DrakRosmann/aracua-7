@@ -8,6 +8,7 @@ import { Icon } from '../components/Icons'
 import { AttitudeTape, Compass, ObstacleRadar, Speedometer } from '../components/Instruments'
 import { Sticks } from '../components/Sticks'
 import { CountdownOverlay, DeliveryPanel, ReleaseFlash } from '../components/Delivery'
+import { EnginePanel } from '../components/Engine'
 import { ForcePrompt, ReplayBar } from '../components/Replay'
 import { vehicleClass } from '../types'
 import { t as tr } from '../lib/i18n'
@@ -57,6 +58,7 @@ function FlyRail() {
         <button className={`rb ${station.lidarLayer ? 'on' : ''}`} onClick={() => { station.lidarLayer = !station.lidarLayer; station.emit('ui') }}><Icon.layers />{tr('LiDAR')}</button>
         <button className={`rb ${station.map3d ? 'on' : ''}`} title={tr('Mapa inclinado com os obstáculos do LiDAR em 3D; gire com o botão direito ou com dois dedos')} onClick={() => { station.map3d = !station.map3d; station.emit('ui') }}><Icon.cube />{tr('3D')}</button>
         <button className={`rb ${station.deliveryOpen ? 'on' : ''}`} onClick={() => { station.deliveryOpen = !station.deliveryOpen; station.emit('ui') }}><Icon.drop />{tr('Entrega')}</button>
+        <button className={`rb ${station.engineOpen ? 'on' : ''}`} title={tr('Painel do motor: rotação, temperaturas, combustível, bateria e gerador')} onClick={() => { station.engineOpen = !station.engineOpen; station.emit('ui') }}><Icon.engine />{tr('Motor')}</button>
         <button className="rb" onClick={() => station.mapApi?.zoomBy(1)}><Icon.plus />{tr('Zoom')}</button>
         <button className="rb" onClick={() => station.mapApi?.zoomBy(-1)}><Icon.minus />{tr('Zoom')}</button>
       </div>
@@ -218,6 +220,7 @@ export function FlyView() {
       <AttitudeTape />
       <FlightTime />
       <DeliveryPanel />
+      <EnginePanel />
       <ReleaseFlash />
       <CountdownOverlay />
       <Toast />

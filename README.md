@@ -23,7 +23,7 @@ O app junta a interface, a ponte MAVLink e o simulador. Ao abrir, a tela **Conec
 como chegar ao drone:
 
 * **Simulador** — veículo virtual com mapa LiDAR sintético, para treinar e testar sem hardware:
-  multirrotor, helicóptero, avião ou VTOL;
+  multirrotor, helicóptero, avião ou VTOL, com motor elétrico, a combustão, turbina ou híbrido;
 * **Rádio de telemetria** — escolha a porta serial (rádio SiK a 57600 ou USB da controladora);
 * **Rede (UDP)** — rádio IP, MAVLink router ou SITL enviando para a máquina;
 * **TCP / SITL** — por exemplo `127.0.0.1:5760`;
@@ -74,6 +74,13 @@ O que mais a estação faz:
   se ficou no ar mais de 5 s) e guarda em `manutencao.json` (`--maintenance-file`). Em
   **Configurar → Manutenção** ficam as tarefas periódicas (por horas ou voos), as baterias, as anotações
   e o histórico de voos.
+* **Painel do motor:** o botão **Motor** da tela de voo abre um painel no estilo EMS de avião, com
+  mostradores e barras em faixas verde/amarela/vermelha. Elétrico: rotação e temperatura de cada ESC,
+  tensão, corrente e temperatura da bateria e a tensão de cada célula. Combustão: RPM, CHT e EGT por
+  cilindro, água, óleo e combustível (EFI). Turbina: N1, EGT, fluxo, bomba e estado da partida. Com um
+  gerador a bordo (híbrido), mostra rotação, potência, carga da bateria e alarmes. Os limites ficam em
+  **Configurar → Motor**; com o veículo armado, o que sai da faixa vai para o log (vermelho também na tela).
+  Fontes e nomes dos sensores extras em [`docs/protocolo.md`](docs/protocolo.md#motor-e-energia-telemetrypropulsion).
 * **Mapa 3D:** o botão **3D** da tela de voo inclina o mapa e mostra os obstáculos do LiDAR como blocos;
   gire com o botão direito do mouse ou com dois dedos.
 * **Tablet:** em telas de toque os botões e campos ficam maiores, e entre 760 e 1180 px os painéis e
@@ -138,6 +145,11 @@ O veículo simulado serve para testar a interface. Para validar voo de verdade, 
 pairam (modos do ArduCopter). O avião decola correndo no modo TAKEOFF, precisa de velocidade para
 voar, faz curvas inclinado e circula em LOITER e RTL (modos do ArduPlane). O VTOL decola na vertical,
 voa como avião e paira nos modos Q (QHOVER, QLOITER, QLAND, QRTL).
+
+`--propulsion electric|combustion|jet|hybrid` escolhe o motor: elétrico (ESCs e bateria 6S com células),
+combustão (EFI com RPM, CHT/EGT de dois cilindros e tanque), turbina (N1, EGT e sequência de partida ao
+armar) ou híbrido (elétrico com gerador que aquece 8 s e depois carrega a bateria). Só alimenta o painel do
+motor: não muda a física do voo.
 
 ## Tipos de veículo
 
@@ -216,7 +228,7 @@ De ponta a ponta (Node 22, depois de `cargo build --bins` em `bridge/`):
 ```bash
 node tests/simulador.mjs          # ponte + fake-vehicle: token, missão e download, entrega em voo do
                                   # avião, pouso, VTOL, gravação e reprodução, calibrações, geocerca,
-                                  # manutenção, rádio
+                                  # manutenção, rádio, motor (elétrico, combustão, turbina, híbrido)
 tests/baixar-sitl.sh              # baixa o SITL oficial (ArduCopter e ArduPlane estáveis) em tests/.sitl
 node tests/sitl.mjs               # ponte + SITL: missão com entrega, download, RTL e pouso (Copter);
                                   # TAKEOFF, missão e pouso com DO_LAND_START (Plane)

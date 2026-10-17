@@ -12,7 +12,7 @@ const bin = (n) => process.env[`${n.toUpperCase().replace('-', '_')}_BIN`] ?? jo
 let port = 28700
 
 /** Ponte + simulador em portas próprias (não esbarram num app aberto). */
-async function pilha({ vehicle = 'copter', bridgeArgs = [], sim = true } = {}) {
+async function pilha({ vehicle = 'copter', propulsion = 'electric', bridgeArgs = [], sim = true } = {}) {
   const p = { ws: ++port, mav: ++port, map: ++port }
   const dir = tempDir('teste')
   const ponte = run(bin('aracua-bridge'), [
@@ -20,7 +20,7 @@ async function pilha({ vehicle = 'copter', bridgeArgs = [], sim = true } = {}) {
     '--payload-file', join(dir, 'entrega.json'), '--maintenance-file', join(dir, 'manutencao.json'), '--log-dir', join(dir, 'logs'), ...bridgeArgs,
   ])
   await sleep(400)
-  const veiculo = sim ? run(bin('fake-vehicle'), ['--vehicle', vehicle, '--mavlink', `udpout:127.0.0.1:${p.mav}`, '--map', `127.0.0.1:${p.map}`]) : null
+  const veiculo = sim ? run(bin('fake-vehicle'), ['--vehicle', vehicle, '--propulsion', propulsion, '--mavlink', `udpout:127.0.0.1:${p.mav}`, '--map', `127.0.0.1:${p.map}`]) : null
   return {
     ...p, dir, ponte, veiculo, url: `ws://127.0.0.1:${p.ws}`,
     async cliente(query = '') {
@@ -277,6 +277,36 @@ const falhas = await suite('Ponte + simulador', [
       if (c.t.rc[2] > 1200) throw new Error(`acelerador em ${c.t.rc[2]}`)
       c.close()
     } finally { s.stop() }
+  }],
+
+  ['motor elétrico: ESCs girando e bateria com células', async () => {
+    const s = await pilha()
+    try {
+      const c = await s.cliente()
+      await c.until(() => c.t.propulsion?.batteries[0]?.cells.length === 6, 5_000, 'bateria 6S com células')
+      const b = c.t.propulsion.batteries[0]
+      if (Math.abs(b.voltage - c.t.battery.voltage) > 0.3) throw new Error(`pack ${b.voltage} V, SYS_STATUS ${c.t.battery.voltage} V`)
+      c.send({ cmd: 'takeoff', alt: 10 })
+      await c.until(() => c.t.propulsion.escs.length === 4 && c.t.propulsion.escs.every((e) => e.rpm > 3000), 20_000, '4 ESCs acima de 3000 rpm')
+      c.close()
+    } finally { s.stop() }
+  }],
+
+  ['motor a combustão, turbina e híbrido', async () => {
+    for (const [vehicle, propulsion, ok, what] of [
+      ['plane', 'combustion', (p) => p.efi?.rpm > 1500 && p.named.CHT2 > 25 && p.named.FUEL > 80, 'EFI com rotação, CHT2 e tanque'],
+      ['plane', 'jet', (p) => p.named.TURB_ST === 4 && p.efi?.rpm > 30_000 && p.efi.cht === null, 'turbina funcionando (TURB_ST 4)'],
+      ['vtol', 'hybrid', (p) => p.generator?.status.includes('generating') && p.generator.power_w > 0 && p.escs.length === 5, 'gerador gerando'],
+    ]) {
+      const s = await pilha({ vehicle, propulsion })
+      try {
+        const c = await s.cliente()
+        if (propulsion !== 'hybrid' && c.t.propulsion.escs.length) throw new Error(`${propulsion}: não devia ter ESC`)
+        c.send({ cmd: 'arm', arm: true })
+        await c.until(() => c.t.armed && ok(c.t.propulsion), 20_000, `${propulsion}: ${what}`)
+        c.close()
+      } finally { s.stop() }
+    }
   }],
 ])
 

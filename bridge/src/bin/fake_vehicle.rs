@@ -8,6 +8,10 @@
 //! avião voa com velocidade mínima, faz curvas inclinado e circula para
 //! "parar" (ArduPlane); VTOL paira nos modos Q e voa como avião nos demais.
 //!
+//! `--propulsion` escolhe o motor: elétrico (ESCs e bateria com células),
+//! combustão (injeção EFI com CHT/EGT e tanque), turbina (EFI com N1, EGT e
+//! sequência de partida) ou híbrido (elétrico com gerador a bordo).
+//!
 //!   cargo run --bin fake-vehicle
 //!
 //! Não substitui o SITL do ArduPilot para validar voo: a física é cinemática.
@@ -40,9 +44,22 @@ struct Args {
     /// Tipo de veículo: copter (multirrotor), heli, plane (avião) ou vtol
     #[arg(long, default_value = "copter", value_parser = parse_class)]
     vehicle: VehicleClass,
+    /// Motor: electric (elétrico), combustion (combustão), jet (turbina) ou hybrid (elétrico com gerador)
+    #[arg(long, default_value = "electric", value_parser = parse_propulsion)]
+    propulsion: Propulsion,
     /// Sai quando a entrada padrão fechar (usado pelo app desktop)
     #[arg(long)]
     exit_with_parent: bool,
+}
+
+fn parse_propulsion(s: &str) -> Result<Propulsion, String> {
+    match s {
+        "electric" => Ok(Propulsion::Electric),
+        "combustion" => Ok(Propulsion::Combustion),
+        "jet" => Ok(Propulsion::Jet),
+        "hybrid" => Ok(Propulsion::Hybrid),
+        _ => Err(format!("motor inválido: {s} (use electric, combustion, jet ou hybrid)")),
+    }
 }
 
 fn parse_class(s: &str) -> Result<VehicleClass, String> {
@@ -59,6 +76,8 @@ const MAX_BANK_DEG: f64 = 40.0;
 /// Velocidade abaixo da qual o avião perde sustentação.
 const STALL_MS: f64 = 11.0;
 const LIDAR_RANGE: f64 = 90.0;
+/// Capacidade da bateria simulada.
+const BATT_MAH: f64 = 5000.0;
 
 #[derive(Clone, Copy)]
 struct Bx {
@@ -208,7 +227,13 @@ struct Vehicle {
     cur: u16,
     manual: (f64, f64, f64, f64, Instant),
     used_mah: f64,
+    /// Corrente da bateria (A); negativa carregando.
     current: f64,
+    /// Demanda do motor em ampères equivalentes (empuxo pedido), suavizada.
+    load: f64,
+    /// Corrente que o gerador entrega ao barramento (híbrido).
+    gen_a: f64,
+    propulsion: Propulsion,
     landed_t: f64,
     params: HashMap<String, f32>,
     texts: Vec<(MavSeverity, String)>,
@@ -381,7 +406,7 @@ fn main() -> anyhow::Result<()> {
         class, airspeed: 0.0, orbit: None, leg_start: (0.0, 0.0), accel_step: None, mag_cal: None,
         e: 0.0, n: 0.0, alt: 0.0, ve: 0.0, vn: 0.0, vz: 0.0, hdg: 48.0, roll: 0.0, pitch: 0.0, yaw_rate: 0.0,
         armed: false, mode: modes::mode_number(class, start_mode).unwrap_or(0), target_alt: 0.0, guided_target: None, mission: vec![], fence_items: vec![], fence: Default::default(), incoming: None, cur: 0,
-        manual: (0.0, 0.0, 0.5, 0.0, Instant::now()), used_mah: 0.0, current: 0.0, landed_t: 0.0, params,
+        manual: (0.0, 0.0, 0.5, 0.0, Instant::now()), used_mah: 0.0, current: 0.0, load: 0.0, gen_a: 0.0, propulsion: args.propulsion, landed_t: 0.0, params,
         texts: vec![], boot: Instant::now(), servo: [0; 16], relay: [false; 8],
         present: [true, true, true, true, false, false], refill_at: [None; 6], loiter_until: None,
     }));
@@ -620,6 +645,7 @@ fn main() -> anyhow::Result<()> {
     let mut first_map = true;
     let mut wind = (0.0f64, 0.0f64);
     let start = Instant::now();
+    let mut engine = Engine::new(args.propulsion, class);
     loop {
         let t0 = Instant::now();
         tick += 1;
@@ -800,7 +826,7 @@ fn main() -> anyhow::Result<()> {
         }
         let air = s.alt > 0.15;
         let sp = s.ve.hypot(s.vn);
-        let cur = if !s.armed {
+        let demand = if !s.armed {
             0.4
         } else if !s.hovering() {
             // asa fixa: o motor só empurra; a corrente cresce com a velocidade e a subida
@@ -810,9 +836,11 @@ fn main() -> anyhow::Result<()> {
         } else {
             2.2
         };
-        s.current += (cur - s.current) * 0.05;
-        s.used_mah += s.current * dt / 3.6;
-        let soc = (1.0 - s.used_mah / 5000.0).clamp(0.0, 1.0);
+        s.load += (demand - s.load) * 0.05;
+        // Motor a combustível: a bateria só alimenta a aviônica. Híbrido: o gerador ajuda.
+        s.current = if s.propulsion.burns_fuel() { if s.armed { 2.4 } else { 0.8 } } else { s.load } - s.gen_a;
+        s.used_mah = (s.used_mah + s.current * dt / 3.6).max(0.0);
+        let soc = (1.0 - s.used_mah / BATT_MAH).clamp(0.0, 1.0);
         let returning = ["RTL", "LAND", "QRTL", "QLAND"].contains(&s.mode_name().as_str());
         if fence.0 && air && s.e.hypot(s.n) > fence.1 && !returning {
             s.go("RTL");
@@ -824,7 +852,7 @@ fn main() -> anyhow::Result<()> {
                 s.say(MavSeverity::MAV_SEVERITY_CRITICAL, format!("Geocerca violada ({why}): RTL"));
             }
         }
-        if air && soc * 5000.0 < p("BATT_LOW_MAH", 750.0) && !returning {
+        if air && soc * BATT_MAH < p("BATT_LOW_MAH", 750.0) && !returning {
             s.go("RTL");
             s.say(MavSeverity::MAV_SEVERITY_CRITICAL, "Bateria baixa: RTL");
         }
@@ -896,8 +924,26 @@ fn main() -> anyhow::Result<()> {
         let texts: Vec<_> = std::mem::take(&mut s.texts);
         let airspeed = if s.hovering() { s.ve.hypot(s.vn) } else { s.airspeed };
         let snap = (s.armed, s.mode, s.roll, s.pitch, s.hdg, s.yaw_rate, s.alt, s.ve, s.vn, s.vz, s.current, s.used_mah, s.cur, s.mission.len());
+        let (load, hovering) = (s.load, s.hovering());
         drop(s);
         let (armed, mode, roll, pitch, hdg, yaw_rate, alt, ve, vn, vz, current, used, cur, mlen) = snap;
+        // ---- Motor e energia ----
+        let soc = (1.0 - used / BATT_MAH).clamp(0.0, 1.0);
+        let cells = engine.cells(soc, current);
+        let pack_v: f64 = cells.iter().sum();
+        let (gen_a, note) = engine.step(dt, armed, load, hovering, current, pack_v);
+        {
+            let mut s = v.lock().unwrap();
+            s.gen_a = gen_a;
+            if let Some(t) = note {
+                s.say(MavSeverity::MAV_SEVERITY_CRITICAL, t);
+            }
+        }
+        if tick.is_multiple_of(10) {
+            for m in engine.messages(boot_ms, &cells, current, used, soc, tick.is_multiple_of(25)) {
+                send(m);
+            }
+        }
         for (sev, t) in texts {
             send(MavMessage::STATUSTEXT(STATUSTEXT_DATA { severity: sev, text: t.as_str().into(), ..Default::default() }));
         }
@@ -926,7 +972,6 @@ fn main() -> anyhow::Result<()> {
                 system_status: if armed { MavState::MAV_STATE_ACTIVE } else { MavState::MAV_STATE_STANDBY },
                 mavlink_version: 3,
             }));
-            send(MavMessage::BATTERY_STATUS(BATTERY_STATUS_DATA { current_consumed: used as i32, current_battery: (current * 100.0) as i16, battery_remaining: (100.0 * (1.0 - used / 5000.0)).clamp(0.0, 100.0) as i8, ..Default::default() }));
             send(MavMessage::RADIO_STATUS(RADIO_STATUS_DATA { rssi: 200 - (lat - home_lat).abs().min(1.0) as u8, remrssi: 190, noise: 40, remnoise: 45, rxerrors: 0, fixed: 0, txbuf: 100 }));
             let auto = modes::mode_name(class, mode) == "AUTO";
             send(MavMessage::MISSION_CURRENT(MISSION_CURRENT_DATA { seq: if auto { cur } else { 0 }, ..Default::default() }));
@@ -971,14 +1016,13 @@ fn main() -> anyhow::Result<()> {
             send(MavMessage::HOME_POSITION(HOME_POSITION_DATA { latitude: (home_lat * 1e7) as i32, longitude: (home_lon * 1e7) as i32, altitude: (HOME_MSL * 1000.0) as i32, ..Default::default() }));
         }
         if tick.is_multiple_of(25) {
-            let soc = (1.0 - used / 5000.0).clamp(0.0, 1.0);
             let all = MavSysStatusSensor::all();
             send(MavMessage::SYS_STATUS(SYS_STATUS_DATA {
                 onboard_control_sensors_present: all,
                 onboard_control_sensors_enabled: all,
                 onboard_control_sensors_health: all,
                 load: 350,
-                voltage_battery: ((6.0 * (3.45 + 0.75 * soc) - current * 0.012) * 1000.0) as u16,
+                voltage_battery: (pack_v * 1000.0) as u16,
                 current_battery: (current * 100.0) as i16,
                 battery_remaining: (soc * 100.0) as i8,
                 ..Default::default()
@@ -1259,4 +1303,291 @@ fn rand_gauss(seed: u64) -> f64 {
         sum += (x >> 11) as f64 / (1u64 << 53) as f64;
     }
     (sum - 2.0) * 1.7
+}
+
+// ---------- Motor e energia ----------
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Propulsion {
+    Electric,
+    Combustion,
+    Jet,
+    Hybrid,
+}
+
+impl Propulsion {
+    fn burns_fuel(self) -> bool {
+        matches!(self, Propulsion::Combustion | Propulsion::Jet)
+    }
+}
+
+/// Estados da turbina enviados em `TURB_ST` (convenção da estação, ver docs/protocolo.md).
+const TURB_OFF: u8 = 0;
+const TURB_READY: u8 = 1;
+const TURB_IGNITION: u8 = 2;
+const TURB_ACCEL: u8 = 3;
+const TURB_RUNNING: u8 = 4;
+const TURB_COOLING: u8 = 5;
+
+/// Aproxima `x` de `target` com constante de tempo `tau` (s).
+fn lag(x: &mut f64, target: f64, tau: f64, dt: f64) {
+    *x += (target - *x) * (dt / tau).min(1.0);
+}
+
+/// Modelo térmico e de rotação do motor simulado. Só serve para a tela mostrar
+/// números plausíveis: não interfere na física do voo.
+struct Engine {
+    kind: Propulsion,
+    /// Quantos ESCs e qual deles empurra no voo horizontal (VTOL).
+    escs: usize,
+    pusher: Option<usize>,
+    cells: usize,
+    esc_rpm: Vec<f64>,
+    esc_temp: Vec<f64>,
+    esc_mah: Vec<f64>,
+    batt_temp: f64,
+    energy_wh: f64,
+    /// Motor a combustível/turbina: rotação, temperaturas por cilindro e tanque.
+    rpm: f64,
+    cht: [f64; 2],
+    egt: [f64; 2],
+    flow: f64,
+    tank_cm3: f64,
+    fuel_used: f64,
+    starved: bool,
+    turb: u8,
+    turb_t: f64,
+    /// Gerador (híbrido).
+    gen_a: f64,
+    gen_rpm: f64,
+    gen_temp: f64,
+    rect_temp: f64,
+    gen_on_s: f64,
+    runtime_s: f64,
+    thr: f64,
+    load: f64,
+}
+
+impl Engine {
+    fn new(kind: Propulsion, class: VehicleClass) -> Self {
+        let (escs, pusher) = match (kind, class) {
+            (Propulsion::Combustion | Propulsion::Jet, _) => (0, None),
+            (_, VehicleClass::Copter) => (4, None),
+            (_, VehicleClass::Vtol) => (5, Some(4)),
+            _ => (1, None),
+        };
+        let tank_cm3 = if kind == Propulsion::Jet { 5000.0 } else { 4000.0 };
+        Engine {
+            kind, escs, pusher,
+            cells: if kind.burns_fuel() { 3 } else { 6 },
+            esc_rpm: vec![0.0; escs], esc_temp: vec![26.0; escs], esc_mah: vec![0.0; escs],
+            batt_temp: 24.0, energy_wh: 0.0,
+            rpm: 0.0, cht: [25.0; 2], egt: [25.0; 2], flow: 0.0,
+            // Começa com o tanque a 90 %.
+            tank_cm3, fuel_used: tank_cm3 * 0.1, starved: false,
+            turb: TURB_READY, turb_t: 0.0,
+            gen_a: 0.0, gen_rpm: 0.0, gen_temp: 25.0, rect_temp: 25.0, gen_on_s: 0.0, runtime_s: 1_262_000.0 / 3.6,
+            thr: 0.0, load: 0.0,
+        }
+    }
+
+    /// Tensão de cada célula: cai com a carga e a corrente; a célula 4 é a mais fraca.
+    fn cells(&self, soc: f64, current: f64) -> Vec<f64> {
+        const OFFSET: [f64; 6] = [0.004, -0.003, 0.002, -0.011, 0.001, -0.002];
+        (0..self.cells)
+            .map(|i| {
+                let weak = if i == 3 { 0.0006 * current.max(0.0) } else { 0.0 };
+                3.45 + 0.75 * soc - 0.002 * current + OFFSET[i] - weak
+            })
+            .collect()
+    }
+
+    /// Avança o modelo; devolve a corrente do gerador e um aviso, se houver.
+    fn step(&mut self, dt: f64, armed: bool, load: f64, hovering: bool, current: f64, pack_v: f64) -> (f64, Option<String>) {
+        let full = if hovering { 34.0 } else { 24.0 };
+        self.thr = if armed { (load / full).clamp(0.0, 1.0) } else { 0.0 };
+        self.load = load;
+        let thr = self.thr;
+        let mut note = None;
+        // ESCs: a carga se divide entre os motores que estão empurrando.
+        let active: Vec<usize> = (0..self.escs).filter(|&i| self.pusher.is_none() || (Some(i) == self.pusher) != hovering).collect();
+        for i in 0..self.escs {
+            let on = armed && active.contains(&i);
+            let spread = [0.0, 140.0, -90.0, 60.0, 0.0][i % 5];
+            let target = if on { 2400.0 + thr * 7800.0 + spread } else { 0.0 };
+            lag(&mut self.esc_rpm[i], target, 0.15, dt);
+            let share = if on { load / active.len().max(1) as f64 } else { 0.0 };
+            self.esc_mah[i] += share * dt / 3.6;
+            let heat = if on { 28.0 + 62.0 * thr.powf(1.5) + i as f64 * 1.5 } else { 26.0 };
+            lag(&mut self.esc_temp[i], heat, 35.0, dt);
+        }
+        lag(&mut self.batt_temp, 24.0 + current.abs() * 0.45, 90.0, dt);
+        self.energy_wh += (pack_v * current).max(0.0) * dt / 3600.0;
+
+        match self.kind {
+            Propulsion::Combustion => {
+                let running = armed && !self.starved;
+                lag(&mut self.rpm, if running { 1900.0 + thr * 4700.0 } else { 0.0 }, 0.5, dt);
+                for i in 0..2 {
+                    let hot = if running { 95.0 + 118.0 * thr + i as f64 * 7.0 } else { 25.0 };
+                    lag(&mut self.cht[i], hot, if running { 50.0 } else { 140.0 }, dt);
+                    lag(&mut self.egt[i], if running { 470.0 + 270.0 * thr - i as f64 * 14.0 } else { 25.0 }, 6.0, dt);
+                }
+                self.flow = if running { 9.0 + 70.0 * thr.powf(1.2) } else { 0.0 };
+            }
+            Propulsion::Jet => {
+                self.turb_t += dt;
+                let next = match self.turb {
+                    TURB_OFF | TURB_READY if armed && !self.starved => Some(TURB_IGNITION),
+                    TURB_IGNITION if self.turb_t > 3.0 => Some(TURB_ACCEL),
+                    TURB_ACCEL if self.turb_t > 4.0 => Some(TURB_RUNNING),
+                    TURB_IGNITION | TURB_ACCEL | TURB_RUNNING if !armed || self.starved => Some(TURB_COOLING),
+                    TURB_COOLING if self.egt[0] < 120.0 => Some(TURB_READY),
+                    _ => None,
+                };
+                if let Some(n) = next {
+                    self.turb = n;
+                    self.turb_t = 0.0;
+                }
+                let (rpm, egt, tau) = match self.turb {
+                    TURB_IGNITION => (9000.0, 320.0, 1.5),
+                    TURB_ACCEL => (38_000.0, 640.0, 1.2),
+                    TURB_RUNNING => (38_000.0 + thr * 82_000.0, 470.0 + 210.0 * thr, 1.5),
+                    // Resfriamento: o motor de partida gira devagar até a EGT baixar.
+                    TURB_COOLING => (6000.0, 25.0, 12.0),
+                    _ => (0.0, 25.0, 30.0),
+                };
+                lag(&mut self.rpm, rpm, 1.0, dt);
+                lag(&mut self.egt[0], egt, tau, dt);
+                self.egt[1] = self.egt[0];
+                self.flow = match self.turb {
+                    TURB_RUNNING => 95.0 + 380.0 * thr,
+                    TURB_ACCEL => 130.0,
+                    TURB_IGNITION => 40.0,
+                    _ => 0.0,
+                };
+            }
+            Propulsion::Hybrid => {
+                // Gerador: aquece 8 s ao armar, depois entrega a carga e mais 4 A para carregar.
+                self.gen_on_s = if armed { self.gen_on_s + dt } else { 0.0 };
+                let generating = self.gen_on_s > 8.0;
+                if generating {
+                    self.runtime_s += dt;
+                }
+                lag(&mut self.gen_a, if generating { (load + 4.0).min(26.0) } else { 0.0 }, 2.0, dt);
+                lag(&mut self.gen_rpm, if generating { 6200.0 + 1500.0 * self.gen_a / 26.0 } else if armed { 4500.0 } else { 0.0 }, 1.0, dt);
+                lag(&mut self.gen_temp, if armed { 40.0 + 48.0 * self.gen_a / 26.0 } else { 25.0 }, 60.0, dt);
+                lag(&mut self.rect_temp, if armed { 35.0 + 36.0 * self.gen_a / 26.0 } else { 25.0 }, 40.0, dt);
+            }
+            Propulsion::Electric => {}
+        }
+        if self.kind.burns_fuel() && !self.starved {
+            self.fuel_used += self.flow * dt / 60.0;
+            if self.fuel_used >= self.tank_cm3 {
+                self.starved = true;
+                note = Some("Motor parou: tanque vazio".to_string());
+            }
+        }
+        (self.gen_a, note)
+    }
+
+    fn messages(&self, boot_ms: u32, cells: &[f64], current: f64, used: f64, soc: f64, battery: bool) -> Vec<MavMessage> {
+        let mut out = vec![];
+        let named = |name: &str, value: f64| MavMessage::NAMED_VALUE_FLOAT(NAMED_VALUE_FLOAT_DATA { time_boot_ms: boot_ms, value: value as f32, name: name.into() });
+        // ESCs em grupos de 4, como o ArduPilot.
+        for (g, chunk) in (0..self.escs).collect::<Vec<_>>().chunks(4).enumerate() {
+            let mut d = ESC_TELEMETRY_1_TO_4_DATA::default();
+            for (k, &i) in chunk.iter().enumerate() {
+                let share = if self.esc_rpm[i] > 100.0 { current.max(0.0) / self.escs as f64 } else { 0.0 };
+                d.rpm[k] = if self.esc_rpm[i] > 100.0 { (self.esc_rpm[i] + rand_gauss(boot_ms as u64 + i as u64) * 25.0).max(0.0) as u16 } else { 0 };
+                d.temperature[k] = self.esc_temp[i] as u8;
+                d.voltage[k] = (cells.iter().sum::<f64>() * 100.0) as u16;
+                d.current[k] = (share * 100.0) as u16;
+                d.totalcurrent[k] = self.esc_mah[i] as u16;
+                d.count[k] = (boot_ms / 200) as u16;
+            }
+            out.push(match g {
+                0 => MavMessage::ESC_TELEMETRY_1_TO_4(d),
+                _ => MavMessage::ESC_TELEMETRY_5_TO_8(ESC_TELEMETRY_5_TO_8_DATA {
+                    temperature: d.temperature, voltage: d.voltage, current: d.current, totalcurrent: d.totalcurrent, rpm: d.rpm, count: d.count,
+                }),
+            });
+        }
+        if self.kind.burns_fuel() {
+            let jet = self.kind == Propulsion::Jet;
+            let rpm = self.rpm + if self.rpm > 100.0 { rand_gauss(boot_ms as u64) * if jet { 180.0 } else { 20.0 } } else { 0.0 };
+            out.push(MavMessage::EFI_STATUS(EFI_STATUS_DATA {
+                health: 1,
+                ecu_index: 0.0,
+                rpm: rpm.max(0.0) as f32,
+                fuel_consumed: self.fuel_used as f32,
+                fuel_flow: self.flow as f32,
+                engine_load: (self.thr * 100.0) as f32,
+                throttle_position: (self.thr * 100.0) as f32,
+                throttle_out: (self.thr * 100.0) as f32,
+                cylinder_head_temperature: if jet { f32::NAN } else { self.cht[0] as f32 },
+                exhaust_gas_temperature: self.egt[0] as f32,
+                intake_manifold_pressure: if jet { f32::NAN } else { (38.0 + 56.0 * self.thr) as f32 },
+                intake_manifold_temperature: if jet { f32::NAN } else { 31.0 },
+                barometric_pressure: 92.6,
+                ignition_voltage: if jet { f32::NAN } else { 12.3 },
+                fuel_pressure: if jet { (40.0 + 260.0 * self.thr) as f32 } else { 290.0 },
+                ..Default::default()
+            }));
+            out.push(MavMessage::RPM(RPM_DATA { rpm1: rpm.max(0.0) as f32, rpm2: -1.0 }));
+            out.push(named("FUEL", 100.0 * (1.0 - self.fuel_used / self.tank_cm3).max(0.0)));
+            if jet {
+                out.push(named("TURB_ST", self.turb as f64));
+                out.push(named("PUMP_V", if self.turb == TURB_RUNNING { 0.4 + 3.8 * self.thr } else if self.turb == TURB_ACCEL { 1.6 } else { 0.0 }));
+            } else {
+                out.push(named("CHT2", self.cht[1]));
+                out.push(named("EGT2", self.egt[1]));
+            }
+        }
+        if self.kind == Propulsion::Hybrid {
+            let generating = self.gen_on_s > 8.0;
+            let mut st = if generating { MavGeneratorStatusFlag::MAV_GENERATOR_STATUS_FLAG_GENERATING }
+                else if self.gen_on_s > 0.0 { MavGeneratorStatusFlag::MAV_GENERATOR_STATUS_FLAG_WARMING_UP | MavGeneratorStatusFlag::MAV_GENERATOR_STATUS_FLAG_READY }
+                else { MavGeneratorStatusFlag::MAV_GENERATOR_STATUS_FLAG_OFF };
+            if current < -0.2 {
+                st |= MavGeneratorStatusFlag::MAV_GENERATOR_STATUS_FLAG_CHARGING;
+            }
+            let bus: f64 = cells.iter().sum();
+            out.push(MavMessage::GENERATOR_STATUS(GENERATOR_STATUS_DATA {
+                status: st,
+                generator_speed: self.gen_rpm as u16,
+                battery_current: current as f32,
+                load_current: self.load as f32,
+                power_generated: (bus * self.gen_a) as f32,
+                bus_voltage: bus as f32,
+                rectifier_temperature: self.rect_temp as i16,
+                bat_current_setpoint: 4.0,
+                generator_temperature: self.gen_temp as i16,
+                runtime: self.runtime_s as u32,
+                time_until_maintenance: (300.0 * 3600.0 - self.runtime_s) as i32,
+            }));
+        }
+        if battery {
+            let mut voltages = [u16::MAX; 10];
+            for (v, c) in voltages.iter_mut().zip(cells) {
+                *v = (c * 1000.0) as u16;
+            }
+            let remaining_mah = (BATT_MAH - used).max(0.0);
+            out.push(MavMessage::BATTERY_STATUS(BATTERY_STATUS_DATA {
+                id: 0,
+                battery_function: if self.kind.burns_fuel() { MavBatteryFunction::MAV_BATTERY_FUNCTION_AVIONICS } else { MavBatteryFunction::MAV_BATTERY_FUNCTION_PROPULSION },
+                mavtype: MavBatteryType::MAV_BATTERY_TYPE_LIPO,
+                temperature: (self.batt_temp * 100.0) as i16,
+                voltages,
+                current_battery: (current * 100.0) as i16,
+                current_consumed: used as i32,
+                energy_consumed: (self.energy_wh * 36.0) as i32,
+                battery_remaining: (soc * 100.0) as i8,
+                time_remaining: if current > 1.0 { (remaining_mah / current * 3.6) as i32 } else { 0 },
+                charge_state: if soc < 0.15 { MavBatteryChargeState::MAV_BATTERY_CHARGE_STATE_CRITICAL } else if soc < 0.3 { MavBatteryChargeState::MAV_BATTERY_CHARGE_STATE_LOW } else { MavBatteryChargeState::MAV_BATTERY_CHARGE_STATE_OK },
+                ..Default::default()
+            }));
+        }
+        out
+    }
 }

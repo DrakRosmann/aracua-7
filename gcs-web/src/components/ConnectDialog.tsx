@@ -4,7 +4,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { station, useChannels } from '../lib/store'
-import { desktop, savedLink, SIM_VEHICLES, type FlightLog, type LinkConfig, type PortInfo, type SimVehicle } from '../lib/desktop'
+import { desktop, savedLink, SIM_PROPULSION, SIM_VEHICLES, type FlightLog, type LinkConfig, type PortInfo, type SimPropulsion, type SimVehicle } from '../lib/desktop'
 import { getLang, t as tr } from '../lib/i18n'
 
 type Kind = LinkConfig['kind']
@@ -41,6 +41,7 @@ export function ConnectDialog() {
   const [listen, setListen] = useState(last?.kind === 'udp' ? last.listen : '0.0.0.0:14550')
   const [address, setAddress] = useState(last?.kind === 'tcp' ? last.address : '127.0.0.1:5760')
   const [vehicle, setVehicle] = useState<SimVehicle>(last?.kind === 'simulator' ? last.vehicle ?? 'copter' : 'copter')
+  const [propulsion, setPropulsion] = useState<SimPropulsion>(last?.kind === 'simulator' ? last.propulsion ?? 'electric' : 'electric')
   const [showLog, setShowLog] = useState(false)
   const logBox = useRef<HTMLPreElement>(null)
 
@@ -61,7 +62,7 @@ export function ConnectDialog() {
 
   const config = (): LinkConfig => {
     switch (kind) {
-      case 'simulator': return { kind, vehicle }
+      case 'simulator': return { kind, vehicle, propulsion }
       case 'serial': return { kind, port, baud }
       case 'udp': return { kind, listen }
       case 'tcp': return { kind, address }
@@ -93,6 +94,12 @@ export function ConnectDialog() {
                 {SIM_VEHICLES.map((v) => (
                   <button key={v.id} type="button" role="radio" aria-checked={vehicle === v.id}
                     className={vehicle === v.id ? 'on' : ''} onClick={() => setVehicle(v.id)}>{tr(v.label)}</button>
+                ))}
+              </div>
+              <div className="cx-seg" role="radiogroup" aria-label={tr('Motor do veículo simulado')}>
+                {SIM_PROPULSION.map((p) => (
+                  <button key={p.id} type="button" role="radio" aria-checked={propulsion === p.id}
+                    className={propulsion === p.id ? 'on' : ''} onClick={() => setPropulsion(p.id)}>{tr(p.label)}</button>
                 ))}
               </div>
               <p className="hint">{SIM_HINT[vehicle]} {tr('O simulador segue missões, solta cargas e gera um bairro sintético para o LiDAR. A física é simplificada: para validar voo de verdade, use o SITL do ArduPilot (opção TCP).')}</p>

@@ -12,6 +12,7 @@ import { emptyFence, type FenceData } from './fence'
 import type { MaintenanceState } from '../types'
 import { setupTiles, type Bounds } from './tiles'
 import { getLang, setLang, t as tr, tk, type Lang } from './i18n'
+import { AlertTracker, buildPanel, DEFAULT_ENGINE, issues, type EngineSettings } from './engine'
 
 // Origens de lançamento que a ponte manda (em português, traduzidas na tela).
 tk('missão'); tk('externo'); tk('estação')
@@ -34,6 +35,8 @@ export interface Settings {
   theme: 'dark' | 'light' | 'auto'
   /** Guarda no computador os tiles vistos com rede (mapa offline). */
   keepTiles: boolean
+  /** Tipo de motor, células, tanque e faixas do painel do motor. */
+  engine: EngineSettings
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -48,6 +51,7 @@ const DEFAULT_SETTINGS: Settings = {
   lang: getLang(),
   theme: 'dark',
   keepTiles: true,
+  engine: DEFAULT_ENGINE,
 }
 
 function loadSettings(): Settings {
@@ -56,6 +60,7 @@ function loadSettings(): Settings {
     const q = new URLSearchParams(location.search).get('bridge')
     const s = { ...DEFAULT_SETTINGS, ...(raw ? JSON.parse(raw) : {}) }
     if (q) s.bridgeUrl = q
+    s.engine = { ...DEFAULT_ENGINE, ...s.engine }
     // No app desktop a ponte é local e iniciada pelo próprio app.
     if (isDesktop) s.bridgeUrl = 'ws://127.0.0.1:8765'
     applyLook(s)
@@ -95,6 +100,9 @@ class Station {
   /** Painel de entrega visível na tela de voo. */
   // Em tablet o painel de entrega começa fechado, para sobrar mapa.
   deliveryOpen = !(typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse) and (max-width: 1180px)').matches)
+  /** Painel do motor visível na tela de voo. */
+  engineOpen = false
+  private engineAlerts = new AlertTracker()
   surveyPreview: { width: number; height: number; spacing: number; northSouth: boolean } | null = null
   /** Preenchido pelo MapView para que outros componentes controlem o mapa. */
   mapApi: { center(): LatLon; zoom(): number; bounds(): Bounds; zoomBy(d: number): void; flyTo(p: LatLon): void; fit(pts: LatLon[]): void } | null = null
@@ -459,6 +467,14 @@ class Station {
     this.emit('calib')
   }
 
+  /** Motor/bateria fora da faixa com o veículo armado: avisa no log (vermelho também no aviso da tela). */
+  private checkEngine(t: Telemetry) {
+    if (!t.connected || !t.armed || !t.propulsion) return this.engineAlerts.reset()
+    for (const i of this.engineAlerts.update(issues(buildPanel(t, this.settings.engine)), Date.now())) {
+      this.addLog(i.level === 'crit' ? 'error' : 'warn', tr('Motor: {text}', { text: i.text }))
+    }
+  }
+
   private onTelemetry(t: Telemetry) {
     const prev = this.telem
     this.telem = t
@@ -476,6 +492,7 @@ class Station {
     if (prev && prev.connected !== t.connected) this.addLog(t.connected ? 'ok' : 'error', t.connected ? tr('Veículo conectado') : tr('Sem HEARTBEAT do veículo'))
     if (prev && prev.armed !== t.armed) this.addLog(t.armed ? 'warn' : 'ok', t.armed ? tr('Veículo armado') : tr('Veículo desarmado'))
     if (prev && prev.mode !== t.mode && t.connected) this.addLog('info', `Modo: ${t.mode}`)
+    this.checkEngine(t)
     // Resumo do voo
     const now = t.t / 1000
     const pos = { lat: t.lat, lon: t.lon }

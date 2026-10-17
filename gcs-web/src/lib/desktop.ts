@@ -14,8 +14,17 @@ export const SIM_VEHICLES: { id: SimVehicle; label: string }[] = [
   { id: 'vtol', label: tk('VTOL') },
 ]
 
+export type SimPropulsion = 'electric' | 'combustion' | 'jet' | 'hybrid'
+
+export const SIM_PROPULSION: { id: SimPropulsion; label: string }[] = [
+  { id: 'electric', label: tk('Elétrico') },
+  { id: 'combustion', label: tk('Combustão') },
+  { id: 'jet', label: tk('Turbina') },
+  { id: 'hybrid', label: tk('Híbrido') },
+]
+
 export type LinkConfig =
-  | { kind: 'simulator'; lat?: number; lon?: number; vehicle?: SimVehicle }
+  | { kind: 'simulator'; lat?: number; lon?: number; vehicle?: SimVehicle; propulsion?: SimPropulsion }
   | { kind: 'serial'; port: string; baud: number }
   | { kind: 'udp'; listen: string }
   | { kind: 'tcp'; address: string }
@@ -58,7 +67,7 @@ export const desktop = {
 export function describeLink(c: LinkConfig | null): string {
   if (!c) return tr('desconectado')
   switch (c.kind) {
-    case 'simulator': return `${tr('Simulador')} · ${tr(SIM_VEHICLES.find((v) => v.id === (c.vehicle ?? 'copter'))?.label ?? '')}`
+    case 'simulator': return `${tr('Simulador')} · ${tr(SIM_VEHICLES.find((v) => v.id === (c.vehicle ?? 'copter'))?.label ?? '')} · ${tr(SIM_PROPULSION.find((p) => p.id === (c.propulsion ?? 'electric'))?.label ?? '')}`
     case 'serial': return `${tr('Rádio')} ${c.port} · ${c.baud}`
     case 'udp': return `UDP ${c.listen}`
     case 'tcp': return `TCP ${c.address}`

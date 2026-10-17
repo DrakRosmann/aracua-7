@@ -102,7 +102,7 @@ export function ConnectDialog() {
                     className={propulsion === p.id ? 'on' : ''} onClick={() => setPropulsion(p.id)}>{tr(p.label)}</button>
                 ))}
               </div>
-              <p className="hint">{SIM_HINT[vehicle]} {tr('O simulador segue missões, solta cargas e gera um bairro sintético para o LiDAR. A física é simplificada: para validar voo de verdade, use o SITL do ArduPilot (opção TCP).')}</p>
+              <p className="hint">{SIM_HINT[vehicle]} {tr('O simulador segue missões, solta cargas e gera um bairro sintético para o LiDAR e para a câmera (o vídeo dele aparece quando nenhum outro está configurado). A física é simplificada: para validar voo de verdade, use o SITL do ArduPilot (opção TCP).')}</p>
             </>
           )}
           {kind === 'serial' && (

@@ -168,7 +168,7 @@ function StationSettings() {
       </div>
       <div className="card">
         {!station.link && field('bridgeUrl', t('Endereço da ponte'), t('WebSocket do aracua-bridge; inclua ?token=… se a ponte pedir'))}
-        {field('videoUrl', t('Vídeo da câmera'), t('MJPEG, HLS (.m3u8) ou MP4; ex.: saída do MediaMTX'))}
+        {field('videoUrl', t('Vídeo da câmera'), t('MJPEG, HLS (.m3u8) ou MP4; ex.: saída do MediaMTX. Vazio no app: a câmera do simulador'))}
         {field('tileUrl', t('Mapa de fundo'), t('URL de tiles raster com {z}/{x}/{y}; recarregue a página para aplicar'))}
         {field('tileAttribution', t('Créditos do mapa'), t('mostrados no canto do mapa'))}
         {field('takeoffAlt', t('Altitude de decolagem'), t('metros, usada pelo botão Decolar'), 'number')}

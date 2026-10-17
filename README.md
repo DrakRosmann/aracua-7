@@ -174,6 +174,12 @@ combustão (EFI com RPM, CHT/EGT de dois cilindros e tanque), turbina (N1, EGT e
 armar) ou híbrido (elétrico com gerador que aquece 8 s e depois carrega a bateria). Só alimenta o painel do
 motor: não muda a física do voo.
 
+O simulador também tem **câmera**: desenha o bairro sintético visto do drone (rumo do veículo e inclinação
+pedida ao gimbal por `DO_MOUNT_CONTROL`) e serve em MJPEG em `http://127.0.0.1:8090/video.mjpg`
+(`/snapshot.jpg` dá um quadro; `--camera ENDEREÇO` muda a porta, `--camera off` desliga). No app, esse vídeo
+aparece sozinho quando nenhum outro está configurado; no navegador, cole o endereço em
+**Configurar → Estação → Vídeo da câmera**.
+
 ## Tipos de veículo
 
 A ponte lê o tipo no HEARTBEAT (`MAV_TYPE`) e usa a tabela de modos do firmware certo: o mesmo número

@@ -35,6 +35,8 @@ export interface LinkStatus {
   config: LinkConfig | null
   exit_code: number | null
   bridge_url: string
+  /** Vídeo da câmera do simulador, quando ele está rodando. */
+  camera_url?: string | null
   log: string[]
 }
 

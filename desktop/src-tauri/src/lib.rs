@@ -20,6 +20,8 @@ use tauri::{Manager, RunEvent, State};
 const DEFAULT_WS_PORT: u16 = 8765;
 const DEFAULT_SIM_PORT: u16 = 14550;
 const DEFAULT_MAP_PORT: u16 = 14600;
+/// Vídeo MJPEG da câmera do simulador.
+const DEFAULT_CAM_PORT: u16 = 8090;
 
 fn port(var: &str, default: u16) -> u16 {
     std::env::var(var).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
@@ -142,6 +144,8 @@ pub struct LinkStatus {
     /// Código de saída se a ponte terminou sozinha.
     pub exit_code: Option<i32>,
     pub bridge_url: String,
+    /// Vídeo da câmera do simulador, quando ele está rodando.
+    pub camera_url: Option<String>,
     pub log: Vec<String>,
 }
 
@@ -216,6 +220,7 @@ impl Supervisor {
             config: guard.as_ref().map(|r| r.config.clone()),
             exit_code: *self.exit_code.lock().unwrap(),
             bridge_url: format!("ws://{}/?token={}", bridge_ws(), self.token),
+            camera_url: guard.as_ref().filter(|r| r.sim.is_some()).map(|_| format!("http://127.0.0.1:{}/video.mjpg", port("ARACUA_CAM_PORT", DEFAULT_CAM_PORT))),
             log: self.log.lock().unwrap().iter().cloned().collect(),
         }
     }
@@ -368,6 +373,8 @@ fn start_link(app: tauri::AppHandle, sup: State<'_, Supervisor>, config: LinkCon
             format!("udpout:127.0.0.1:{}", port("ARACUA_SIM_PORT", DEFAULT_SIM_PORT)),
             "--map".into(),
             format!("127.0.0.1:{}", port("ARACUA_MAP_PORT", DEFAULT_MAP_PORT)),
+            "--camera".into(),
+            format!("127.0.0.1:{}", port("ARACUA_CAM_PORT", DEFAULT_CAM_PORT)),
         ];
         if let Some(v) = vehicle {
             args.extend(["--vehicle".into(), sim_vehicle(v)?.into()]);

@@ -1,8 +1,8 @@
 // Instrumentos circulares: atitude + altitude, velocímetro, bússola e radar LiDAR.
 // Desenham em canvas a cada quadro, lendo a telemetria mais recente sem re-render.
 
-import { useEffect, useRef } from 'react'
 import { station } from '../lib/store'
+import { useCanvasLoop } from '../lib/canvas'
 import type { Telemetry } from '../types'
 import { t as tr } from '../lib/i18n'
 
@@ -11,32 +11,6 @@ const DEG = Math.PI / 180
 const SEL = '#36c9f0'
 const F = (w: number, s: number) => `${w} ${Math.round(s)}px Roboto, system-ui, sans-serif`
 
-function useCanvasLoop(draw: (ctx: CanvasRenderingContext2D, w: number, h: number, t: Telemetry | null) => void) {
-  const ref = useRef<HTMLCanvasElement>(null)
-  useEffect(() => {
-    let raf = 0
-    const loop = () => {
-      const cv = ref.current
-      if (cv && cv.offsetParent !== null) {
-        const r = cv.getBoundingClientRect()
-        const d = Math.min(2, devicePixelRatio || 1)
-        const W = Math.max(1, Math.round(r.width * d)), H = Math.max(1, Math.round(r.height * d))
-        if (cv.width !== W || cv.height !== H) {
-          cv.width = W
-          cv.height = H
-        }
-        const ctx = cv.getContext('2d')!
-        ctx.setTransform(d, 0, 0, d, 0, 0)
-        ctx.clearRect(0, 0, r.width, r.height)
-        draw(ctx, r.width, r.height, station.telem)
-      }
-      raf = requestAnimationFrame(loop)
-    }
-    raf = requestAnimationFrame(loop)
-    return () => cancelAnimationFrame(raf)
-  }, [draw])
-  return ref
-}
 
 function drawAttitude(ctx: CanvasRenderingContext2D, w: number, h: number, t: Telemetry | null) {
   const alt = t?.alt_rel ?? 0, roll = t?.roll ?? 0, pitch = t?.pitch ?? 0
@@ -185,4 +159,8 @@ export function Compass() {
 }
 export function ObstacleRadar() {
   return <canvas ref={useCanvasLoop(drawRadar)} id="cvRadar" className="dial" aria-label={tr('Radar de obstáculos')} />
+}
+/** Radar de obstáculos ocupando o espaço todo (aba Painel). */
+export function RadarScope() {
+  return <canvas ref={useCanvasLoop(drawRadar)} className="ck-cv" aria-label={tr('Radar de obstáculos')} />
 }

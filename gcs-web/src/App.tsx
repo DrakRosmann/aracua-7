@@ -6,6 +6,8 @@ import { FlyView } from './views/FlyView'
 import { PlanView } from './views/PlanView'
 import { SetupView } from './views/SetupView'
 import { AnalyzeView } from './views/AnalyzeView'
+import { CockpitView } from './components/Cockpit'
+import { Toast } from './views/FlyView'
 import { ConnectDialog } from './components/ConnectDialog'
 import { isDesktop } from './lib/desktop'
 import { t as tr } from './lib/i18n'
@@ -49,7 +51,8 @@ export default function App() {
       {v === 'plan' && <PlanView />}
       {v === 'setup' && <SetupView />}
       {v === 'analyze' && <AnalyzeView />}
-      {(v === 'fly' || v === 'plan') && <ConnectionBanner />}
+      {v === 'panel' && <><CockpitView /><Toast /></>}
+      {(v === 'fly' || v === 'plan' || v === 'panel') && <ConnectionBanner />}
       {isDesktop && <DesktopLink />}
     </div>
   )

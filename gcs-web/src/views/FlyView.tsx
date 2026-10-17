@@ -8,6 +8,7 @@ import { Icon } from '../components/Icons'
 import { AttitudeTape, Compass, ObstacleRadar, Speedometer } from '../components/Instruments'
 import { Sticks } from '../components/Sticks'
 import { PadStatus } from '../components/Gamepad'
+import { AutopilotPanel } from '../components/Autopilot'
 import { CountdownOverlay, DeliveryPanel, ReleaseFlash } from '../components/Delivery'
 import { EnginePanel } from '../components/Engine'
 import { ForcePrompt, ReplayBar } from '../components/Replay'
@@ -60,6 +61,7 @@ function FlyRail() {
         <button className={`rb ${station.map3d ? 'on' : ''}`} title={tr('Mapa inclinado com os obstáculos do LiDAR em 3D; gire com o botão direito ou com dois dedos')} onClick={() => { station.map3d = !station.map3d; station.emit('ui') }}><Icon.cube />{tr('3D')}</button>
         <button className={`rb ${station.deliveryOpen ? 'on' : ''}`} onClick={() => { station.deliveryOpen = !station.deliveryOpen; station.emit('ui') }}><Icon.drop />{tr('Entrega')}</button>
         <button className={`rb ${station.engineOpen ? 'on' : ''}`} title={tr('Painel do motor: rotação, temperaturas, combustível, bateria e gerador')} onClick={() => { station.engineOpen = !station.engineOpen; station.emit('ui') }}><Icon.engine />{tr('Motor')}</button>
+        <button className={`rb ${station.apOpen ? 'on' : ''} ${station.telem?.ap?.engaged ? 'apon' : ''}`} title={tr('Piloto automático: rumo, altitude, velocidade vertical e velocidade, como num avião')} onClick={() => { station.apOpen = !station.apOpen; station.emit('ui') }}><Icon.yoke />{tr('A/P')}</button>
         <button className="rb" onClick={() => station.mapApi?.zoomBy(1)}><Icon.plus />{tr('Zoom')}</button>
         <button className="rb" onClick={() => station.mapApi?.zoomBy(-1)}><Icon.minus />{tr('Zoom')}</button>
       </div>
@@ -223,6 +225,7 @@ export function FlyView() {
       <FlightTime />
       <DeliveryPanel />
       <EnginePanel />
+      <AutopilotPanel />
       <ReleaseFlash />
       <CountdownOverlay />
       <Toast />

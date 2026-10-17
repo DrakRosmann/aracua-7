@@ -53,6 +53,34 @@ export interface Telemetry {
   msg_stats: Record<string, { count: number; hz: number }>
   /** Motor e energia (ver docs/protocolo.md); ausente em pontes antigas. */
   propulsion?: Propulsion
+  /** Piloto automático da ponte (`autopilot` é o nome do firmware); ausente em pontes antigas. */
+  ap?: AutopilotState
+}
+
+/** Piloto automático estilo avião (ver bridge/src/autopilot.rs). */
+export interface AutopilotState {
+  engaged: boolean
+  lateral: 'hdg' | 'nav'
+  vertical: 'alt' | 'vs' | 'nav'
+  hdg: number
+  alt_sel: number
+  alt_hold: number
+  vs: number
+  spd: number
+  spd_on: boolean
+  /** Por que desligou sozinho; null se foi o operador. */
+  message: string | null
+}
+
+export interface AutopilotPatch {
+  engage?: boolean
+  lateral?: 'hdg' | 'nav'
+  vertical?: 'alt' | 'vs'
+  hdg?: number
+  alt?: number
+  vs?: number
+  spd?: number
+  spd_on?: boolean
 }
 
 // ---------- Motor e energia ----------
@@ -286,6 +314,7 @@ export type ClientCommand =
   | { cmd: 'payload_config'; slots: PayloadSlot[]; settings: PayloadSettings }
   | { cmd: 'payload_reset_counter' }
   | { cmd: 'payload_get' }
+  | ({ cmd: 'autopilot' } & AutopilotPatch)
 
 // ---------- Tipos de veículo e modos de voo ----------
 

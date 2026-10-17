@@ -9,7 +9,7 @@ export interface AxisMap { axis: number; invert: boolean }
 
 export type PadAction =
   | 'none' | 'arm' | 'rtl' | 'land' | 'pause' | 'photo'
-  | 'gimbal_up' | 'gimbal_down' | 'gimbal_center' | 'mode1' | 'mode2' | 'mode3'
+  | 'gimbal_up' | 'gimbal_down' | 'gimbal_center' | 'mode1' | 'mode2' | 'mode3' | 'ap_toggle'
 
 /** center: stick no meio = manter (0,5); incremental: o stick move o acelerador, que fica onde parou;
  *  triggers: RT sobe e LT desce (asa fixa: RT é o acelerador); auto: incremental no avião, centrado no resto. */
@@ -77,6 +77,7 @@ export const ACTION_LABEL: Record<PadAction, string> = {
   mode1: tk('Modo 1'),
   mode2: tk('Modo 2'),
   mode3: tk('Modo 3'),
+  ap_toggle: tk('Piloto automático liga/desliga'),
 }
 
 /** Ações que exigem segurar o botão (evita armar sem querer). */

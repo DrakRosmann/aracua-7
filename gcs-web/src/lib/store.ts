@@ -107,6 +107,9 @@ class Station {
   deliveryOpen = !(typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse) and (max-width: 1180px)').matches)
   /** Painel do motor visível na tela de voo. */
   engineOpen = false
+  /** Painel do piloto automático visível e quando ele desligou sozinho (alarme). */
+  apOpen = false
+  apOffAt = 0
   /** Inclinação do gimbal pedida (graus), comum ao controle e ao painel. */
   gimbalPitch = -30
 
@@ -516,6 +519,13 @@ class Station {
     if (prev && prev.armed !== t.armed) this.addLog(t.armed ? 'warn' : 'ok', t.armed ? tr('Veículo armado') : tr('Veículo desarmado'))
     if (prev && prev.mode !== t.mode && t.connected) this.addLog('info', `Modo: ${t.mode}`)
     this.checkEngine(t)
+    // Piloto automático desligou sem o operador pedir: alarme sonoro, como no avião.
+    if (prev?.ap?.engaged && t.ap && !t.ap.engaged && t.ap.message) {
+      this.apOffAt = Date.now()
+      this.apOpen = true
+      this.apAlarm()
+      this.emit('ui')
+    }
     // Resumo do voo
     const now = t.t / 1000
     const pos = { lat: t.lat, lon: t.lon }
@@ -714,12 +724,40 @@ class Station {
       case 'gimbal_up': gimbal(this.gimbalPitch + 10); break
       case 'gimbal_down': gimbal(this.gimbalPitch - 10); break
       case 'gimbal_center': gimbal(0); break
+      case 'ap_toggle': {
+        const ap = t.ap
+        if (ap) this.send({ cmd: 'autopilot', engage: !ap.engaged })
+        break
+      }
       case 'mode1': case 'mode2': case 'mode3': {
         const m = this.settings.gamepad.modes[cls]?.[+a.slice(4) - 1]
         if (m) mode(m)
         break
       }
       case 'none': break
+    }
+  }
+
+  /** Três toques descendentes (o "cavalry charge" do desligamento do piloto automático). */
+  private apAlarm() {
+    try {
+      const ac = new AudioContext()
+      for (let i = 0; i < 3; i++) {
+        for (const [f, dt] of [[1400, 0], [1050, 0.12]] as const) {
+          const o = ac.createOscillator(), g = ac.createGain()
+          const t0 = ac.currentTime + i * 0.36 + dt
+          o.type = 'square'
+          o.frequency.value = f
+          g.gain.setValueAtTime(0.08, t0)
+          g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.11)
+          o.connect(g).connect(ac.destination)
+          o.start(t0)
+          o.stop(t0 + 0.12)
+        }
+      }
+      setTimeout(() => ac.close(), 1500)
+    } catch {
+      /* sem áudio */
     }
   }
 
@@ -872,6 +910,15 @@ function describe(c: ClientCommand): string {
     case 'payload_config': return tr('Configuração de entrega salva ({length} compartimentos)', { length: c.slots.length })
     case 'payload_reset_counter': return tr('Zerar contador de lançamentos')
     case 'payload_get': return tr('Ler estado da entrega')
+    case 'autopilot': {
+      if (c.engage !== undefined) return c.engage ? tr('Ligar piloto automático') : tr('Desligar piloto automático')
+      const parts = [
+        c.lateral && c.lateral.toUpperCase(), c.vertical && (c.vertical === 'vs' ? 'V/S' : 'ALT'),
+        c.hdg !== undefined && `HDG ${Math.round(c.hdg)}°`, c.alt !== undefined && `ALT SEL ${c.alt} m`,
+        c.vs !== undefined && `V/S ${c.vs} m/s`, c.spd !== undefined && `SPD ${c.spd} m/s`, c.spd_on !== undefined && `SPD ${c.spd_on ? 'on' : 'off'}`,
+      ].filter(Boolean)
+      return tr('Piloto automático: {what}', { what: parts.join(', ') })
+    }
   }
 }
 

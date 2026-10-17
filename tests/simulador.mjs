@@ -279,6 +279,52 @@ const falhas = await suite('Ponte + simulador', [
     } finally { s.stop() }
   }],
 
+  ['piloto automático (multirrotor): HDG, V/S com captura e desliga se o modo muda', async () => {
+    const s = await pilha()
+    try {
+      const c = await s.cliente()
+      c.send({ cmd: 'autopilot', engage: true })
+      await c.until(() => c.texts.some((x) => x.includes('só em voo')), 5_000, 'recusar no chão')
+      c.send({ cmd: 'takeoff', alt: 20 })
+      await c.until(() => c.t.alt_rel > 18, 60_000, 'decolar a 20 m')
+      c.send({ cmd: 'mode', mode: 'LOITER' })
+      await c.until(() => c.t.mode === 'LOITER', 5_000, 'LOITER')
+      c.send({ cmd: 'autopilot', engage: true, hdg: 90, spd: 5 })
+      await c.until(() => c.t.ap?.engaged && c.t.mode === 'GUIDED', 5_000, 'ligar o piloto automático')
+      await c.until(() => c.t.ve > 4 && Math.abs(c.t.vn) < 1 && Math.abs(((c.t.heading - 90 + 540) % 360) - 180) < 8, 20_000, 'voar para o leste a 5 m/s')
+      c.send({ cmd: 'autopilot', alt: 35, vs: 1.5, vertical: 'vs' })
+      await c.until(() => c.t.climb > 1.2, 10_000, 'subir no V/S')
+      if (c.t.climb > 1.7) throw new Error(`subiu a ${c.t.climb} m/s (V/S 1,5)`)
+      await c.until(() => c.t.ap.vertical === 'alt' && c.t.ap.alt_hold === 35, 30_000, 'capturar 35 m')
+      await c.until(() => Math.abs(c.t.alt_rel - 35) < 1 && Math.abs(c.t.climb) < 0.3, 10_000, 'nivelar em 35 m')
+      // Outro modo por fora (rádio, failsafe): desliga e avisa.
+      c.send({ cmd: 'mode', mode: 'RTL' })
+      await c.until(() => !c.t.ap.engaged && c.t.ap.message?.includes('RTL'), 8_000, 'desligar ao sair para RTL')
+      if (!c.texts.some((x) => x.includes('piloto automático desligado'))) throw new Error('sem aviso de desligamento')
+      c.close()
+    } finally { s.stop() }
+  }],
+
+  ['piloto automático (avião): rumo, V/S até a ALT SEL e velocidade', async () => {
+    const s = await pilha({ vehicle: 'plane' })
+    try {
+      const c = await s.cliente()
+      c.send({ cmd: 'takeoff', alt: 50 })
+      await c.until(() => c.t.mode === 'LOITER' && c.t.alt_rel > 45, 120_000, 'decolar e circular')
+      c.send({ cmd: 'autopilot', engage: true, hdg: 180 })
+      await c.until(() => c.t.ap?.engaged && c.t.mode === 'GUIDED', 5_000, 'ligar o piloto automático')
+      await c.until(() => Math.abs(((c.t.heading - 180 + 540) % 360) - 180) < 5 && Math.abs(c.t.roll) < 5, 40_000, 'nivelar no rumo 180')
+      c.send({ cmd: 'autopilot', alt: 80, vs: 2.5, vertical: 'vs', spd: 22, spd_on: true })
+      await c.until(() => c.t.climb > 2, 15_000, 'subir no V/S')
+      if (c.t.climb > 3) throw new Error(`subiu a ${c.t.climb} m/s (V/S 2,5)`)
+      await c.until(() => c.t.ap.vertical === 'alt' && Math.abs(c.t.alt_rel - 80) < 3, 40_000, 'capturar 80 m')
+      await c.until(() => Math.abs(c.t.airspeed - 22) < 1, 20_000, 'acelerar a 22 m/s')
+      c.send({ cmd: 'autopilot', engage: false })
+      await c.until(() => !c.t.ap.engaged && c.t.mode === 'LOITER', 5_000, 'desligar e circular')
+      c.close()
+    } finally { s.stop() }
+  }],
+
   ['motor elétrico: ESCs girando e bateria com células', async () => {
     const s = await pilha()
     try {

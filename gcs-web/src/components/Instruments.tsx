@@ -7,6 +7,8 @@ import type { Telemetry } from '../types'
 import { t as tr } from '../lib/i18n'
 
 const DEG = Math.PI / 180
+/** Ciano dos valores selecionados no piloto automático (como no avião). */
+const SEL = '#36c9f0'
 const F = (w: number, s: number) => `${w} ${Math.round(s)}px Roboto, system-ui, sans-serif`
 
 function useCanvasLoop(draw: (ctx: CanvasRenderingContext2D, w: number, h: number, t: Telemetry | null) => void) {
@@ -45,6 +47,14 @@ function drawAttitude(ctx: CanvasRenderingContext2D, w: number, h: number, t: Te
   for (let v = Math.ceil((alt - span) / 2) * 2; v <= alt + span; v += 2) {
     const y = cy - (v - alt) * ppm, l = v % 10 === 0 ? 12 : 6
     ctx.beginPath(); ctx.moveTo(tx, y); ctx.lineTo(tx - l, y); ctx.stroke()
+  }
+  // ALT SEL na fita (preso na borda quando fora da escala).
+  const ap = t?.ap
+  if (ap) {
+    const ys = Math.max(10 * k, Math.min(h - 10 * k, cy - (ap.alt_sel - alt) * ppm))
+    ctx.fillStyle = SEL; ctx.globalAlpha = ap.engaged ? 1 : 0.55
+    ctx.beginPath(); ctx.moveTo(tx + 1, ys); ctx.lineTo(tx + 9, ys - 6); ctx.lineTo(tx + 9, ys + 6); ctx.closePath(); ctx.fill()
+    ctx.globalAlpha = 1
   }
   ctx.fillStyle = '#fff'; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'
   ctx.font = F(400, 11 * k)
@@ -127,8 +137,18 @@ function drawCompass(ctx: CanvasRenderingContext2D, w: number, h: number, t: Tel
     const a = (d - hdg - 90) * DEG
     ctx.fillText(l, cx + Math.cos(a) * (R - 26), cy + Math.sin(a) * (R - 26))
   }
+  // Marcador do rumo selecionado (HDG SEL).
+  const ap = t?.ap
+  if (ap) {
+    const a = (ap.hdg - hdg - 90) * DEG
+    ctx.save(); ctx.translate(cx + Math.cos(a) * (R - 3), cy + Math.sin(a) * (R - 3)); ctx.rotate(a + Math.PI / 2)
+    ctx.fillStyle = SEL; ctx.globalAlpha = ap.engaged && ap.lateral === 'hdg' ? 1 : 0.55
+    ctx.beginPath(); ctx.moveTo(-8, 0); ctx.lineTo(8, 0); ctx.lineTo(8, 8); ctx.lineTo(3, 8); ctx.lineTo(0, 4); ctx.lineTo(-3, 8); ctx.lineTo(-8, 8); ctx.closePath(); ctx.fill()
+    ctx.restore()
+  }
   ctx.fillStyle = '#ef4a3c'; ctx.beginPath(); ctx.moveTo(cx, cy - R + 10); ctx.lineTo(cx - 6, cy - R); ctx.lineTo(cx + 6, cy - R); ctx.closePath(); ctx.fill()
   ctx.fillStyle = '#fff'; ctx.font = F(400, 26); ctx.fillText(`${Math.round(hdg) % 360}°`, cx + 2, cy + 1)
+  if (ap?.engaged && ap.lateral === 'hdg') { ctx.fillStyle = SEL; ctx.font = F(500, 11); ctx.fillText(`HDG ${String(Math.round(ap.hdg) % 360).padStart(3, '0')}`, cx, cy + 24) }
 }
 
 function drawRadar(ctx: CanvasRenderingContext2D, w: number, h: number, t: Telemetry | null) {

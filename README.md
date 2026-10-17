@@ -88,6 +88,13 @@ O que mais a estação faz:
   num modo manual; sem foco na janela a estação manda sticks neutros, e se o controle desconectar ela avisa,
   manda neutro por 1 s e para. Erros vibram o controle. Ajustes e teste ao vivo em **Configurar → Controle**
   (com **Detectar** para controles fora do layout padrão, como o 8BitDo em modo D-input).
+* **Piloto automático estilo avião:** o botão **A/P** da tela de voo abre um painel de modos como o de um
+  avião (MCP), com o anunciador de modos (FMA) em cima: **HDG** (rumo selecionado), **NAV** (missão), **ALT**
+  (segura a altitude), **V/S** (sobe ou desce até a altitude selecionada no ritmo escolhido e nivela) e **SPD**
+  (velocidade). Os valores aparecem em ciano na bússola e na fita de altitude. Se o modo mudar por fora
+  (rádio, failsafe), ele desliga com alarme sonoro e "AP OFF" piscando. No avião usa os comandos
+  `GUIDED_CHANGE_*` do ArduPlane 4.5+; no multirrotor, a ponte manda velocidade e rumo em GUIDED. Detalhes em
+  [`docs/protocolo.md`](docs/protocolo.md#piloto-automático).
 * **Mapa 3D:** o botão **3D** da tela de voo inclina o mapa e mostra os obstáculos do LiDAR como blocos;
   gire com o botão direito do mouse ou com dois dedos.
 * **Tablet:** em telas de toque os botões e campos ficam maiores, e entre 760 e 1180 px os painéis e
@@ -235,7 +242,8 @@ De ponta a ponta (Node 22, depois de `cargo build --bins` em `bridge/`):
 ```bash
 node tests/simulador.mjs          # ponte + fake-vehicle: token, missão e download, entrega em voo do
                                   # avião, pouso, VTOL, gravação e reprodução, calibrações, geocerca,
-                                  # manutenção, rádio, motor (elétrico, combustão, turbina, híbrido)
+                                  # manutenção, rádio, piloto automático, motor (elétrico, combustão,
+                                  # turbina, híbrido)
 tests/baixar-sitl.sh              # baixa o SITL oficial (ArduCopter e ArduPlane estáveis) em tests/.sitl
 node tests/sitl.mjs               # ponte + SITL: missão com entrega, download, RTL e pouso (Copter);
                                   # TAKEOFF, missão e pouso com DO_LAND_START (Plane)

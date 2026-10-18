@@ -17,6 +17,9 @@
 //! Não substitui o SITL do ArduPilot para validar voo: a física é cinemática.
 #![allow(deprecated)]
 
+#[path = "../sim/camera.rs"]
+mod camera;
+
 use aracua_bridge::modes::VehicleClass;
 use aracua_bridge::{apm::*, char_array_to_string, mapframe, modes};
 use clap::Parser;
@@ -47,6 +50,9 @@ struct Args {
     /// Motor: electric (elétrico), combustion (combustão), jet (turbina) ou hybrid (elétrico com gerador)
     #[arg(long, default_value = "electric", value_parser = parse_propulsion)]
     propulsion: Propulsion,
+    /// Endereço do vídeo da câmera simulada (MJPEG em http://ENDEREÇO/video.mjpg); "off" desliga
+    #[arg(long, default_value = "127.0.0.1:8090")]
+    camera: String,
     /// Sai quando a entrada padrão fechar (usado pelo app desktop)
     #[arg(long)]
     exit_with_parent: bool,
@@ -240,6 +246,8 @@ struct Vehicle {
     /// Corrente que o gerador entrega ao barramento (híbrido).
     gen_a: f64,
     propulsion: Propulsion,
+    /// Inclinação do gimbal da câmera (graus; 0 = horizonte, −90 = para baixo).
+    gimbal_pitch: f64,
     landed_t: f64,
     params: HashMap<String, f32>,
     texts: Vec<(MavSeverity, String)>,
@@ -416,7 +424,7 @@ fn main() -> anyhow::Result<()> {
         class, airspeed: 0.0, orbit: None, leg_start: (0.0, 0.0), accel_step: None, mag_cal: None,
         e: 0.0, n: 0.0, alt: 0.0, ve: 0.0, vn: 0.0, vz: 0.0, hdg: 48.0, roll: 0.0, pitch: 0.0, yaw_rate: 0.0,
         armed: false, mode: modes::mode_number(class, start_mode).unwrap_or(0), target_alt: 0.0, guided_target: None, guided_hdg: None, guided_rate: 0.0, guided_speed: None, guided_vel: None, mission: vec![], fence_items: vec![], fence: Default::default(), incoming: None, cur: 0,
-        manual: (0.0, 0.0, 0.5, 0.0, Instant::now()), used_mah: 0.0, current: 0.0, load: 0.0, gen_a: 0.0, propulsion: args.propulsion, landed_t: 0.0, params,
+        manual: (0.0, 0.0, 0.5, 0.0, Instant::now()), used_mah: 0.0, current: 0.0, load: 0.0, gen_a: 0.0, propulsion: args.propulsion, gimbal_pitch: -30.0, landed_t: 0.0, params,
         texts: vec![], boot: Instant::now(), servo: [0; 16], relay: [false; 8],
         present: [true, true, true, true, false, false], refill_at: [None; 6], loiter_until: None,
     }));
@@ -589,6 +597,10 @@ fn main() -> anyhow::Result<()> {
                         s.say(MavSeverity::MAV_SEVERITY_INFO, "Câmera: foto capturada");
                         ack(&send, c.command, true)
                     }
+                    MavCmd::MAV_CMD_DO_MOUNT_CONTROL => {
+                        s.gimbal_pitch = (c.param1 as f64).clamp(-90.0, 30.0);
+                        ack(&send, c.command, true);
+                    }
                     _ => ack(&send, c.command, true),
                 },
                 MavMessage::MANUAL_CONTROL(m) => {
@@ -678,6 +690,23 @@ fn main() -> anyhow::Result<()> {
     let mut wind = (0.0f64, 0.0f64);
     let start = Instant::now();
     let mut engine = Engine::new(args.propulsion, class);
+    // Câmera: o mesmo bairro do LiDAR, vista do drone.
+    if args.camera != "off" {
+        let bus = Arc::new(camera::Bus::default());
+        match camera::serve(&args.camera, bus.clone()) {
+            Ok(()) => {
+                eprintln!("câmera simulada em http://{}/video.mjpg", args.camera);
+                let blocks = boxes.iter().map(|b| camera::Block { x0: b.x0, y0: b.y0, x1: b.x1, y1: b.y1, h: b.h }).collect();
+                let v = v.clone();
+                camera::run(blocks, bus, move || {
+                    let s = v.lock().unwrap();
+                    // Câmera embaixo do veículo, olhando para a frente dele.
+                    camera::Pose { e: s.e, n: s.n, alt: s.alt + 0.15, hdg: s.hdg, pitch: s.gimbal_pitch }
+                });
+            }
+            Err(e) => eprintln!("câmera simulada desligada: {} ({e})", args.camera),
+        }
+    }
     loop {
         let t0 = Instant::now();
         tick += 1;

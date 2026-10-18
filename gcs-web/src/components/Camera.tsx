@@ -6,7 +6,9 @@ import { t as tr } from '../lib/i18n'
 
 export function CameraFeed() {
   useChannels('ui')
-  const url = station.settings.videoUrl
+  useChannels('link')
+  // Sem vídeo configurado, usa o da câmera do simulador (app desktop).
+  const url = station.settings.videoUrl || station.link?.camera_url || ''
   // Erro vale só para a URL que falhou; trocar o endereço tenta de novo.
   const [failedUrl, setFailedUrl] = useState<string | null>(null)
   const err = failedUrl === url

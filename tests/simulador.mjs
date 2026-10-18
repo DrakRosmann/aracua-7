@@ -13,14 +13,14 @@ let port = 28700
 
 /** Ponte + simulador em portas próprias (não esbarram num app aberto). */
 async function pilha({ vehicle = 'copter', propulsion = 'electric', bridgeArgs = [], sim = true } = {}) {
-  const p = { ws: ++port, mav: ++port, map: ++port }
+  const p = { ws: ++port, mav: ++port, map: ++port, cam: ++port }
   const dir = tempDir('teste')
   const ponte = run(bin('aracua-bridge'), [
     '--ws', `127.0.0.1:${p.ws}`, '--mavlink', `udpin:127.0.0.1:${p.mav}`, '--map-udp', `127.0.0.1:${p.map}`,
     '--payload-file', join(dir, 'entrega.json'), '--maintenance-file', join(dir, 'manutencao.json'), '--log-dir', join(dir, 'logs'), ...bridgeArgs,
   ])
   await sleep(400)
-  const veiculo = sim ? run(bin('fake-vehicle'), ['--vehicle', vehicle, '--propulsion', propulsion, '--mavlink', `udpout:127.0.0.1:${p.mav}`, '--map', `127.0.0.1:${p.map}`]) : null
+  const veiculo = sim ? run(bin('fake-vehicle'), ['--vehicle', vehicle, '--propulsion', propulsion, '--camera', `127.0.0.1:${p.cam}`, '--mavlink', `udpout:127.0.0.1:${p.mav}`, '--map', `127.0.0.1:${p.map}`]) : null
   return {
     ...p, dir, ponte, veiculo, url: `ws://127.0.0.1:${p.ws}`,
     async cliente(query = '') {
@@ -321,6 +321,42 @@ const falhas = await suite('Ponte + simulador', [
       await c.until(() => Math.abs(c.t.airspeed - 22) < 1, 20_000, 'acelerar a 22 m/s')
       c.send({ cmd: 'autopilot', engage: false })
       await c.until(() => !c.t.ap.engaged && c.t.mode === 'LOITER', 5_000, 'desligar e circular')
+      c.close()
+    } finally { s.stop() }
+  }],
+
+  ['câmera simulada: vídeo MJPEG e o gimbal muda a imagem', async () => {
+    const s = await pilha()
+    try {
+      const c = await s.cliente()
+      const foto = async () => {
+        const r = await fetch(`http://127.0.0.1:${s.cam}/snapshot.jpg`)
+        if (!r.ok || r.headers.get('content-type') !== 'image/jpeg') throw new Error(`snapshot: ${r.status} ${r.headers.get('content-type')}`)
+        const b = new Uint8Array(await r.arrayBuffer())
+        if (b[0] !== 0xff || b[1] !== 0xd8 || b.length < 3000) throw new Error(`não é JPEG (${b.length} bytes)`)
+        return b
+      }
+      // Fluxo: vários quadros em 1,5 s.
+      const ac = new AbortController()
+      const r = await fetch(`http://127.0.0.1:${s.cam}/video.mjpg`, { signal: ac.signal })
+      if (!r.headers.get('content-type')?.startsWith('multipart/x-mixed-replace')) throw new Error(`tipo ${r.headers.get('content-type')}`)
+      let quadros = 0
+      const leitor = r.body.getReader()
+      const fim = Date.now() + 1500
+      const dec = new TextDecoder('latin1')
+      while (Date.now() < fim) { const { value } = await leitor.read(); quadros += (dec.decode(value).match(/Content-Type: image\/jpeg/g) ?? []).length }
+      ac.abort()
+      if (quadros < 8) throw new Error(`só ${quadros} quadros em 1,5 s`)
+      // No ar, olhando para o horizonte e depois para baixo: imagens diferentes.
+      c.send({ cmd: 'takeoff', alt: 30 })
+      await c.until(() => c.t.alt_rel > 28, 60_000, 'decolar')
+      c.send({ cmd: 'gimbal', pitch: 0 })
+      await sleep(500)
+      const horizonte = await foto()
+      c.send({ cmd: 'gimbal', pitch: -90 })
+      await sleep(500)
+      const baixo = await foto()
+      if (Math.abs(horizonte.length - baixo.length) < 300) throw new Error(`gimbal não mudou a imagem (${horizonte.length} × ${baixo.length} bytes)`)
       c.close()
     } finally { s.stop() }
   }],

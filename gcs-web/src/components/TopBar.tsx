@@ -29,6 +29,7 @@ const TABS: { v: View; label: string; icon: () => React.JSX.Element }[] = [
   { v: 'setup', label: tr('Configurar'), icon: Icon.gear },
   { v: 'plan', label: tr('Planejar'), icon: Icon.pin },
   { v: 'fly', label: tr('Voo'), icon: Icon.plane },
+  { v: 'panel', label: tr('Painel'), icon: Icon.gauge },
   { v: 'analyze', label: tr('Analisar'), icon: Icon.analyze },
 ]
 

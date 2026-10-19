@@ -13,14 +13,14 @@ let port = 28700
 
 /** Ponte + simulador em portas próprias (não esbarram num app aberto). */
 async function pilha({ vehicle = 'copter', propulsion = 'electric', bridgeArgs = [], sim = true } = {}) {
-  const p = { ws: ++port, mav: ++port, map: ++port }
+  const p = { ws: ++port, mav: ++port, map: ++port, cam: ++port }
   const dir = tempDir('teste')
   const ponte = run(bin('aracua-bridge'), [
     '--ws', `127.0.0.1:${p.ws}`, '--mavlink', `udpin:127.0.0.1:${p.mav}`, '--map-udp', `127.0.0.1:${p.map}`,
     '--payload-file', join(dir, 'entrega.json'), '--maintenance-file', join(dir, 'manutencao.json'), '--log-dir', join(dir, 'logs'), ...bridgeArgs,
   ])
   await sleep(400)
-  const veiculo = sim ? run(bin('fake-vehicle'), ['--vehicle', vehicle, '--propulsion', propulsion, '--mavlink', `udpout:127.0.0.1:${p.mav}`, '--map', `127.0.0.1:${p.map}`]) : null
+  const veiculo = sim ? run(bin('fake-vehicle'), ['--vehicle', vehicle, '--propulsion', propulsion, '--camera', `127.0.0.1:${p.cam}`, '--mavlink', `udpout:127.0.0.1:${p.mav}`, '--map', `127.0.0.1:${p.map}`]) : null
   return {
     ...p, dir, ponte, veiculo, url: `ws://127.0.0.1:${p.ws}`,
     async cliente(query = '') {
@@ -275,6 +275,88 @@ const falhas = await suite('Ponte + simulador', [
       const c = await s.cliente()
       await c.until(() => c.t.rc?.length === 8, 5_000, '8 canais de rádio')
       if (c.t.rc[2] > 1200) throw new Error(`acelerador em ${c.t.rc[2]}`)
+      c.close()
+    } finally { s.stop() }
+  }],
+
+  ['piloto automático (multirrotor): HDG, V/S com captura e desliga se o modo muda', async () => {
+    const s = await pilha()
+    try {
+      const c = await s.cliente()
+      c.send({ cmd: 'autopilot', engage: true })
+      await c.until(() => c.texts.some((x) => x.includes('só em voo')), 5_000, 'recusar no chão')
+      c.send({ cmd: 'takeoff', alt: 20 })
+      await c.until(() => c.t.alt_rel > 18, 60_000, 'decolar a 20 m')
+      c.send({ cmd: 'mode', mode: 'LOITER' })
+      await c.until(() => c.t.mode === 'LOITER', 5_000, 'LOITER')
+      c.send({ cmd: 'autopilot', engage: true, hdg: 90, spd: 5 })
+      await c.until(() => c.t.ap?.engaged && c.t.mode === 'GUIDED', 5_000, 'ligar o piloto automático')
+      await c.until(() => c.t.ve > 4 && Math.abs(c.t.vn) < 1 && Math.abs(((c.t.heading - 90 + 540) % 360) - 180) < 8, 20_000, 'voar para o leste a 5 m/s')
+      c.send({ cmd: 'autopilot', alt: 35, vs: 1.5, vertical: 'vs' })
+      await c.until(() => c.t.climb > 1.2, 10_000, 'subir no V/S')
+      if (c.t.climb > 1.7) throw new Error(`subiu a ${c.t.climb} m/s (V/S 1,5)`)
+      await c.until(() => c.t.ap.vertical === 'alt' && c.t.ap.alt_hold === 35, 30_000, 'capturar 35 m')
+      await c.until(() => Math.abs(c.t.alt_rel - 35) < 1 && Math.abs(c.t.climb) < 0.3, 10_000, 'nivelar em 35 m')
+      // Outro modo por fora (rádio, failsafe): desliga e avisa.
+      c.send({ cmd: 'mode', mode: 'RTL' })
+      await c.until(() => !c.t.ap.engaged && c.t.ap.message?.includes('RTL'), 8_000, 'desligar ao sair para RTL')
+      if (!c.texts.some((x) => x.includes('piloto automático desligado'))) throw new Error('sem aviso de desligamento')
+      c.close()
+    } finally { s.stop() }
+  }],
+
+  ['piloto automático (avião): rumo, V/S até a ALT SEL e velocidade', async () => {
+    const s = await pilha({ vehicle: 'plane' })
+    try {
+      const c = await s.cliente()
+      c.send({ cmd: 'takeoff', alt: 50 })
+      await c.until(() => c.t.mode === 'LOITER' && c.t.alt_rel > 45, 120_000, 'decolar e circular')
+      c.send({ cmd: 'autopilot', engage: true, hdg: 180 })
+      await c.until(() => c.t.ap?.engaged && c.t.mode === 'GUIDED', 5_000, 'ligar o piloto automático')
+      await c.until(() => Math.abs(((c.t.heading - 180 + 540) % 360) - 180) < 5 && Math.abs(c.t.roll) < 5, 40_000, 'nivelar no rumo 180')
+      c.send({ cmd: 'autopilot', alt: 80, vs: 2.5, vertical: 'vs', spd: 22, spd_on: true })
+      await c.until(() => c.t.climb > 2, 15_000, 'subir no V/S')
+      if (c.t.climb > 3) throw new Error(`subiu a ${c.t.climb} m/s (V/S 2,5)`)
+      await c.until(() => c.t.ap.vertical === 'alt' && Math.abs(c.t.alt_rel - 80) < 3, 40_000, 'capturar 80 m')
+      await c.until(() => Math.abs(c.t.airspeed - 22) < 1, 20_000, 'acelerar a 22 m/s')
+      c.send({ cmd: 'autopilot', engage: false })
+      await c.until(() => !c.t.ap.engaged && c.t.mode === 'LOITER', 5_000, 'desligar e circular')
+      c.close()
+    } finally { s.stop() }
+  }],
+
+  ['câmera simulada: vídeo MJPEG e o gimbal muda a imagem', async () => {
+    const s = await pilha()
+    try {
+      const c = await s.cliente()
+      const foto = async () => {
+        const r = await fetch(`http://127.0.0.1:${s.cam}/snapshot.jpg`)
+        if (!r.ok || r.headers.get('content-type') !== 'image/jpeg') throw new Error(`snapshot: ${r.status} ${r.headers.get('content-type')}`)
+        const b = new Uint8Array(await r.arrayBuffer())
+        if (b[0] !== 0xff || b[1] !== 0xd8 || b.length < 3000) throw new Error(`não é JPEG (${b.length} bytes)`)
+        return b
+      }
+      // Fluxo: vários quadros em 1,5 s.
+      const ac = new AbortController()
+      const r = await fetch(`http://127.0.0.1:${s.cam}/video.mjpg`, { signal: ac.signal })
+      if (!r.headers.get('content-type')?.startsWith('multipart/x-mixed-replace')) throw new Error(`tipo ${r.headers.get('content-type')}`)
+      let quadros = 0
+      const leitor = r.body.getReader()
+      const fim = Date.now() + 1500
+      const dec = new TextDecoder('latin1')
+      while (Date.now() < fim) { const { value } = await leitor.read(); quadros += (dec.decode(value).match(/Content-Type: image\/jpeg/g) ?? []).length }
+      ac.abort()
+      if (quadros < 8) throw new Error(`só ${quadros} quadros em 1,5 s`)
+      // No ar, olhando para o horizonte e depois para baixo: imagens diferentes.
+      c.send({ cmd: 'takeoff', alt: 30 })
+      await c.until(() => c.t.alt_rel > 28, 60_000, 'decolar')
+      c.send({ cmd: 'gimbal', pitch: 0 })
+      await sleep(500)
+      const horizonte = await foto()
+      c.send({ cmd: 'gimbal', pitch: -90 })
+      await sleep(500)
+      const baixo = await foto()
+      if (Math.abs(horizonte.length - baixo.length) < 300) throw new Error(`gimbal não mudou a imagem (${horizonte.length} × ${baixo.length} bytes)`)
       c.close()
     } finally { s.stop() }
   }],

@@ -6,19 +6,21 @@ import { useSyncExternalStore } from 'react'
 import { distance, enuToLatLon, type LatLon } from './geo'
 import { decodeMapFrame } from './mapframe'
 import { desktop, describeLink, isDesktop, saveLink, savedLink, type LinkConfig, type LinkStatus } from './desktop'
-import { vehicleClass, type CalibEvent, type ClientCommand, type LogEntry, type LogLevel, type MissionItem, type PayloadState, type ReleaseEvent, type ReplayState, type Sample, type ServerMessage, type Telemetry, type VehicleMission } from '../types'
+import { MANUAL_MODES, vehicleClass, type CalibEvent, type ClientCommand, type LogEntry, type LogLevel, type MissionItem, type PayloadState, type ReleaseEvent, type ReplayState, type Sample, type ServerMessage, type Telemetry, type VehicleMission } from '../types'
 import { paramIdsFor } from './params'
 import { emptyFence, type FenceData } from './fence'
 import type { MaintenanceState } from '../types'
 import { setupTiles, type Bounds } from './tiles'
 import { getLang, setLang, t as tr, tk, type Lang } from './i18n'
 import { AlertTracker, buildPanel, DEFAULT_ENGINE, issues, type EngineSettings } from './engine'
+import { DEFAULT_COCKPIT, type CockpitSettings } from './cockpit'
+import { DEFAULT_PAD, effectiveThrottle, PadButtons, pickPad, readManual, type Manual, type PadAction, type PadSettings, type PadSnapshot } from './gamepad'
 
 // Origens de lançamento que a ponte manda (em português, traduzidas na tela).
 tk('missão'); tk('externo'); tk('estação')
 
-export type Channel = 'telemetry' | 'log' | 'params' | 'mission' | 'map' | 'ui' | 'conn' | 'payload' | 'link' | 'replay' | 'calib' | 'fence' | 'maint'
-export type View = 'fly' | 'plan' | 'setup' | 'analyze'
+export type Channel = 'telemetry' | 'log' | 'params' | 'mission' | 'map' | 'ui' | 'conn' | 'payload' | 'link' | 'replay' | 'calib' | 'fence' | 'maint' | 'pad'
+export type View = 'fly' | 'plan' | 'setup' | 'analyze' | 'panel'
 
 export interface Settings {
   bridgeUrl: string
@@ -37,6 +39,10 @@ export interface Settings {
   keepTiles: boolean
   /** Tipo de motor, células, tanque e faixas do painel do motor. */
   engine: EngineSettings
+  /** Controle de videogame: eixos, botões e acelerador. */
+  gamepad: PadSettings
+  /** Aba Painel: layout, instrumentos de cada espaço, glareshield e alertas. */
+  cockpit: CockpitSettings
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -52,6 +58,8 @@ const DEFAULT_SETTINGS: Settings = {
   theme: 'dark',
   keepTiles: true,
   engine: DEFAULT_ENGINE,
+  gamepad: DEFAULT_PAD,
+  cockpit: DEFAULT_COCKPIT,
 }
 
 function loadSettings(): Settings {
@@ -61,6 +69,9 @@ function loadSettings(): Settings {
     const s = { ...DEFAULT_SETTINGS, ...(raw ? JSON.parse(raw) : {}) }
     if (q) s.bridgeUrl = q
     s.engine = { ...DEFAULT_ENGINE, ...s.engine }
+    s.gamepad = { ...DEFAULT_PAD, ...s.gamepad, modes: { ...DEFAULT_PAD.modes, ...s.gamepad?.modes } }
+    s.cockpit = { ...DEFAULT_COCKPIT, ...s.cockpit, slots: { ...DEFAULT_COCKPIT.slots, ...s.cockpit?.slots } }
+    if (!(s.cockpit.layout in DEFAULT_COCKPIT.slots)) s.cockpit.layout = DEFAULT_COCKPIT.layout
     // No app desktop a ponte é local e iniciada pelo próprio app.
     if (isDesktop) s.bridgeUrl = 'ws://127.0.0.1:8765'
     applyLook(s)
@@ -102,6 +113,27 @@ class Station {
   deliveryOpen = !(typeof matchMedia !== 'undefined' && matchMedia('(pointer: coarse) and (max-width: 1180px)').matches)
   /** Painel do motor visível na tela de voo. */
   engineOpen = false
+  /** Painel do piloto automático visível e quando ele desligou sozinho (alarme). */
+  apOpen = false
+  apOffAt = 0
+  /** Inclinação do gimbal pedida (graus), comum ao controle e ao painel. */
+  gimbalPitch = -30
+
+  // Controle de videogame
+  pad: PadSnapshot | null = null
+  /** O controle está mandando MANUAL_CONTROL agora (os sticks virtuais param). */
+  padActive = false
+  /** Saída atual dos sticks e andamento de um botão de segurar, para a tela. */
+  padOut: Manual | null = null
+  padHold: { action: PadAction; pct: number } | null = null
+  private padButtons = new PadButtons()
+  private padHeld = 0
+  private padLastZ = 0.5
+  private padLastSend = 0
+  private padLastTick = 0
+  private padLastEmit = 0
+  private padNeutral = 0
+  private padUnfocusedWarned = false
   private engineAlerts = new AlertTracker()
   surveyPreview: { width: number; height: number; spacing: number; northSouth: boolean } | null = null
   /** Preenchido pelo MapView para que outros componentes controlem o mapa. */
@@ -493,6 +525,13 @@ class Station {
     if (prev && prev.armed !== t.armed) this.addLog(t.armed ? 'warn' : 'ok', t.armed ? tr('Veículo armado') : tr('Veículo desarmado'))
     if (prev && prev.mode !== t.mode && t.connected) this.addLog('info', `Modo: ${t.mode}`)
     this.checkEngine(t)
+    // Piloto automático desligou sem o operador pedir: alarme sonoro, como no avião.
+    if (prev?.ap?.engaged && t.ap && !t.ap.engaged && t.ap.message) {
+      this.apOffAt = Date.now()
+      this.apOpen = true
+      this.apAlarm()
+      this.emit('ui')
+    }
     // Resumo do voo
     const now = t.t / 1000
     const pos = { lat: t.lat, lon: t.lon }
@@ -589,8 +628,160 @@ class Station {
     return enuToLatLon(this.origin!, this.vox.e[i] * this.voxelM, this.vox.n[i] * this.voxelM)
   }
 
+  // ---------- controle de videogame ----------
+  /** Lê o controle a 20 Hz. A Gamepad API não tem eventos de eixo: só consultando. */
+  startPad() {
+    if (typeof navigator === 'undefined' || typeof navigator.getGamepads !== 'function' || this.padLastTick) return
+    addEventListener('gamepadconnected', (e) => this.addLog('ok', tr('Controle conectado: {id}', { id: (e as GamepadEvent).gamepad.id })))
+    addEventListener('gamepaddisconnected', (e) => this.addLog(this.padActive ? 'error' : 'warn', tr('Controle desconectado: {id}', { id: (e as GamepadEvent).gamepad.id })))
+    this.padLastTick = performance.now()
+    setInterval(() => this.padTick(), 50)
+  }
+
+  private padTick() {
+    const now = performance.now()
+    const dt = Math.min(0.2, (now - this.padLastTick) / 1000)
+    this.padLastTick = now
+    const s = this.settings.gamepad
+    const t = this.telem
+    const cls = vehicleClass(t)
+    const had = this.pad
+    const p = pickPad(navigator.getGamepads(), s.id)
+    this.pad = p
+    // Sem foco, o navegador congela as leituras: manda sticks neutros até voltar.
+    const focused = !document.hidden && document.hasFocus()
+    const armedManual = !!t?.connected && t.armed && MANUAL_MODES[cls].has(t.mode) && !this.replay
+    let sending = false
+    if (p && s.enabled && focused) {
+      this.padUnfocusedWarned = false
+      for (const a of this.padButtons.update(p.buttons.map((b) => b.pressed), s.buttons, now)) this.padAction(a)
+      this.padHold = this.padButtons.holdProgress(s.buttons, now)
+      if (!t?.armed) this.padHeld = 0
+      const r = readManual(p, s, cls, this.padHeld, dt)
+      this.padHeld = r.held
+      this.padOut = r.m
+      if (armedManual) {
+        sending = true
+        if (now - this.padLastSend >= 100) {
+          this.send({ cmd: 'manual', ...r.m }, true)
+          this.padLastSend = now
+          this.padLastZ = r.m.z
+        }
+      }
+    } else {
+      this.padButtons.reset()
+      this.padHold = null
+      this.padOut = null
+      if (p && s.enabled && !focused && this.padActive) {
+        // Controle ainda conectado: segura o veículo parado em vez de largar o comando.
+        sending = armedManual
+        if (!this.padUnfocusedWarned) this.addLog('warn', tr('Janela sem foco: mandando sticks neutros pelo controle'))
+        this.padUnfocusedWarned = true
+        if (sending && now - this.padLastSend >= 100) this.sendNeutral(cls, now)
+      }
+    }
+    if (this.padActive && !sending) {
+      this.padNeutral = 10
+      if (!p && t?.armed) this.addLog('error', tr('Controle perdido em voo: sticks neutros por 1 s; depois o veículo volta ao rádio ou ao failsafe'))
+    }
+    if (!sending && this.padNeutral > 0 && now - this.padLastSend >= 100) {
+      this.padNeutral--
+      if (t?.armed) this.sendNeutral(cls, now)
+    }
+    this.padActive = sending
+    if ((p || had) && now - this.padLastEmit >= 100) {
+      this.padLastEmit = now
+      this.emit('pad')
+    }
+  }
+
+  /** Sticks no centro; o acelerador fica onde estava quando ele não volta sozinho para o meio. */
+  private sendNeutral(cls: ReturnType<typeof vehicleClass>, now: number) {
+    const mode = effectiveThrottle(this.settings.gamepad, cls)
+    const z = mode === 'center' || (mode === 'triggers' && cls !== 'plane') ? 0.5 : this.padLastZ
+    this.send({ cmd: 'manual', x: 0, y: 0, z, r: 0 }, true)
+    this.padLastSend = now
+  }
+
+  private padAction(a: PadAction) {
+    const t = this.telem
+    if (!t?.connected || this.replay) return
+    const cls = vehicleClass(t)
+    const mode = (m: string) => this.send({ cmd: 'mode', mode: m })
+    const gimbal = (pitch: number) => {
+      this.gimbalPitch = Math.max(-90, Math.min(20, pitch))
+      this.send({ cmd: 'gimbal', pitch: this.gimbalPitch })
+      this.emit('ui')
+    }
+    switch (a) {
+      case 'arm':
+        if (!t.armed) this.send({ cmd: 'arm', arm: true })
+        else if (t.alt_rel < 0.5 && t.groundspeed < 1) this.send({ cmd: 'arm', arm: false })
+        else this.addLog('warn', tr('Controle: em voo não desarma; pouse primeiro'))
+        break
+      case 'rtl': mode('RTL'); break
+      case 'land':
+        if (cls === 'copter' || cls === 'heli') mode('LAND')
+        else if (cls === 'vtol') mode('QLAND')
+        else this.addLog('warn', tr('Avião: para pousar, use Retornar ou uma missão com pouso'))
+        break
+      case 'pause': mode(cls === 'rover' ? 'HOLD' : 'LOITER'); break
+      case 'photo': this.send({ cmd: 'photo' }); this.stats.photos++; break
+      case 'gimbal_up': gimbal(this.gimbalPitch + 10); break
+      case 'gimbal_down': gimbal(this.gimbalPitch - 10); break
+      case 'gimbal_center': gimbal(0); break
+      case 'ap_toggle': {
+        const ap = t.ap
+        if (ap) this.send({ cmd: 'autopilot', engage: !ap.engaged })
+        break
+      }
+      case 'mode1': case 'mode2': case 'mode3': {
+        const m = this.settings.gamepad.modes[cls]?.[+a.slice(4) - 1]
+        if (m) mode(m)
+        break
+      }
+      case 'none': break
+    }
+  }
+
+  /** O piloto automático desligou sozinho há pouco (luz e "AP OFF" piscando). */
+  apAlarmOn() {
+    return Date.now() - this.apOffAt < 6000
+  }
+
+  /** Três toques descendentes (o "cavalry charge" do desligamento do piloto automático). */
+  private apAlarm() {
+    try {
+      const ac = new AudioContext()
+      for (let i = 0; i < 3; i++) {
+        for (const [f, dt] of [[1400, 0], [1050, 0.12]] as const) {
+          const o = ac.createOscillator(), g = ac.createGain()
+          const t0 = ac.currentTime + i * 0.36 + dt
+          o.type = 'square'
+          o.frequency.value = f
+          g.gain.setValueAtTime(0.08, t0)
+          g.gain.exponentialRampToValueAtTime(0.001, t0 + 0.11)
+          o.connect(g).connect(ac.destination)
+          o.start(t0)
+          o.stop(t0 + 0.12)
+        }
+      }
+      setTimeout(() => ac.close(), 1500)
+    } catch {
+      /* sem áudio */
+    }
+  }
+
+  /** Vibra o controle em uso (erros e alertas vermelhos). */
+  private rumble() {
+    const gp = this.pad ? navigator.getGamepads()[this.pad.index] : null
+    const act = (gp as (Gamepad & { vibrationActuator?: { playEffect?: (t: string, p: object) => Promise<unknown> } }) | null)?.vibrationActuator
+    act?.playEffect?.('dual-rumble', { duration: 300, strongMagnitude: 0.9, weakMagnitude: 0.5 }).catch(() => {})
+  }
+
   // ---------- log ----------
   addLog(level: LogLevel, text: string) {
+    if (level === 'error' && this.padActive) this.rumble()
     this.log.push({ t: Date.now(), level, text })
     if (this.log.length > 800) this.log.splice(0, this.log.length - 800)
     this.unread++
@@ -730,6 +921,15 @@ function describe(c: ClientCommand): string {
     case 'payload_config': return tr('Configuração de entrega salva ({length} compartimentos)', { length: c.slots.length })
     case 'payload_reset_counter': return tr('Zerar contador de lançamentos')
     case 'payload_get': return tr('Ler estado da entrega')
+    case 'autopilot': {
+      if (c.engage !== undefined) return c.engage ? tr('Ligar piloto automático') : tr('Desligar piloto automático')
+      const parts = [
+        c.lateral && c.lateral.toUpperCase(), c.vertical && (c.vertical === 'vs' ? 'V/S' : 'ALT'),
+        c.hdg !== undefined && `HDG ${Math.round(c.hdg)}°`, c.alt !== undefined && `ALT SEL ${c.alt} m`,
+        c.vs !== undefined && `V/S ${c.vs} m/s`, c.spd !== undefined && `SPD ${c.spd} m/s`, c.spd_on !== undefined && `SPD ${c.spd_on ? 'on' : 'off'}`,
+      ].filter(Boolean)
+      return tr('Piloto automático: {what}', { what: parts.join(', ') })
+    }
   }
 }
 

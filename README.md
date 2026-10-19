@@ -81,6 +81,29 @@ O que mais a estação faz:
   gerador a bordo (híbrido), mostra rotação, potência, carga da bateria e alarmes. Os limites ficam em
   **Configurar → Motor**; com o veículo armado, o que sai da faixa vai para o log (vermelho também na tela).
   Fontes e nomes dos sensores extras em [`docs/protocolo.md`](docs/protocolo.md#motor-e-energia-telemetrypropulsion).
+* **Controle de videogame:** pilote com um controle de Xbox, 8BitDo, PlayStation ou similar (USB ou
+  Bluetooth), no navegador ou no app. Sticks em modo 2 ou 1, com zona morta e expo; acelerador centrado
+  (multirrotor segura a altitude), incremental (avião) ou pelos gatilhos. Botões configuráveis: armar
+  segurando Start 1,5 s, RTL, pousar, pausar, foto, gimbal e três modos de voo. Os sticks só comandam armado
+  num modo manual; sem foco na janela a estação manda sticks neutros, e se o controle desconectar ela avisa,
+  manda neutro por 1 s e para. Erros vibram o controle. Ajustes e teste ao vivo em **Configurar → Controle**
+  (com **Detectar** para controles fora do layout padrão, como o 8BitDo em modo D-input).
+* **Piloto automático estilo avião:** o botão **A/P** da tela de voo abre um painel de modos como o de um
+  avião (MCP), com o anunciador de modos (FMA) em cima: **HDG** (rumo selecionado), **NAV** (missão), **ALT**
+  (segura a altitude), **V/S** (sobe ou desce até a altitude selecionada no ritmo escolhido e nivela) e **SPD**
+  (velocidade). Os valores aparecem em ciano na bússola e na fita de altitude. Se o modo mudar por fora
+  (rádio, failsafe), ele desliga com alarme sonoro e "AP OFF" piscando. No avião usa os comandos
+  `GUIDED_CHANGE_*` do ArduPlane 4.5+; no multirrotor, a ponte manda velocidade e rumo em GUIDED. Detalhes em
+  [`docs/protocolo.md`](docs/protocolo.md#piloto-automático).
+* **Painel (pilotagem por instrumentos):** a aba **Painel** vira uma cabine de avião, com:
+  * o piloto automático no glareshield, em cima;
+  * espaços de instrumentos que você troca à vontade (**Trocar instrumentos**);
+  * luzes de alerta (CAS) embaixo: ARMED, LINK, GPS, BATT, SENS, VIBR, ENG, PROX, FENCE e A/P.
+
+  Instrumentos: PFD (horizonte, fitas de velocidade e altitude, variômetro, rumo e FMA), HSI de navegação
+  (ponteiros para o waypoint e para casa), câmera (com HUD opcional), motor (EMS), radar LiDAR, dados de voo e
+  os seis analógicos clássicos (velocímetro, horizonte, altímetro, indicador de curva, giro direcional e
+  variômetro). Layouts de uma a seis telas, salvos neste computador; **F** ou o botão alterna a tela cheia.
 * **Mapa 3D:** o botão **3D** da tela de voo inclina o mapa e mostra os obstáculos do LiDAR como blocos;
   gire com o botão direito do mouse ou com dois dedos.
 * **Tablet:** em telas de toque os botões e campos ficam maiores, e entre 760 e 1180 px os painéis e
@@ -150,6 +173,12 @@ voa como avião e paira nos modos Q (QHOVER, QLOITER, QLAND, QRTL).
 combustão (EFI com RPM, CHT/EGT de dois cilindros e tanque), turbina (N1, EGT e sequência de partida ao
 armar) ou híbrido (elétrico com gerador que aquece 8 s e depois carrega a bateria). Só alimenta o painel do
 motor: não muda a física do voo.
+
+O simulador também tem **câmera**: desenha o bairro sintético visto do drone (rumo do veículo e inclinação
+pedida ao gimbal por `DO_MOUNT_CONTROL`) e serve em MJPEG em `http://127.0.0.1:8090/video.mjpg`
+(`/snapshot.jpg` dá um quadro; `--camera ENDEREÇO` muda a porta, `--camera off` desliga). No app, esse vídeo
+aparece sozinho quando nenhum outro está configurado; no navegador, cole o endereço em
+**Configurar → Estação → Vídeo da câmera**.
 
 ## Tipos de veículo
 
@@ -228,7 +257,8 @@ De ponta a ponta (Node 22, depois de `cargo build --bins` em `bridge/`):
 ```bash
 node tests/simulador.mjs          # ponte + fake-vehicle: token, missão e download, entrega em voo do
                                   # avião, pouso, VTOL, gravação e reprodução, calibrações, geocerca,
-                                  # manutenção, rádio, motor (elétrico, combustão, turbina, híbrido)
+                                  # manutenção, rádio, piloto automático, motor (elétrico, combustão,
+                                  # turbina, híbrido)
 tests/baixar-sitl.sh              # baixa o SITL oficial (ArduCopter e ArduPlane estáveis) em tests/.sitl
 node tests/sitl.mjs               # ponte + SITL: missão com entrega, download, RTL e pouso (Copter);
                                   # TAKEOFF, missão e pouso com DO_LAND_START (Plane)

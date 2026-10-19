@@ -24,6 +24,8 @@ export const Icon = {
   target: () => <S><circle cx="12" cy="12" r="6.5" /><circle cx="12" cy="12" r="1.5" /><path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3" /></S>,
   layers: () => <S><path d="M12 3 2.5 8l9.5 5 9.5-5L12 3z" /><path d="M2.5 13l9.5 5 9.5-5" /></S>,
   engine: () => <S><path d="M4 9h2V7h4V5h4v2h3l2 3h1.5v5H19l-2 3h-6l-2-2H6v-3H4z" /><path d="M2 10.5v4" /></S>,
+  yoke: () => <S><path d="M3 9.5h5.5l1.5 2h4l1.5-2H21v3a3 3 0 0 1-3 3h-2.5l-1.5 2h-4l-1.5-2H6a3 3 0 0 1-3-3z" /><path d="M12 17.5V21" /></S>,
+  gauge: () => <S><path d="M4.5 17a8.5 8.5 0 1 1 15 0" /><path d="M12 13.5 16 9" /><circle cx="12" cy="13.5" r="1.4" /><path d="M3 20.5h18" /></S>,
   plus: () => <S><path d="M12 6v12M6 12h12" /></S>,
   minus: () => <S><path d="M6 12h12" /></S>,
   grid: () => <S><rect x="3.5" y="3.5" width="17" height="17" rx="1" /><path d="M7 7h10v3.3H7v3.4h10V17H7" /></S>,

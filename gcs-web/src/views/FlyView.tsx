@@ -1,12 +1,15 @@
 // Tela de voo: trilho de ações, painel de instrumentos, câmera e mostradores.
 
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { station, useChannels } from '../lib/store'
 import { cardinal, fmtDist, fmtTime } from '../lib/format'
 import { distance } from '../lib/geo'
 import { Icon } from '../components/Icons'
 import { AttitudeTape, Compass, ObstacleRadar, Speedometer } from '../components/Instruments'
 import { Sticks } from '../components/Sticks'
+import { CameraFeed } from '../components/Camera'
+import { PadStatus } from '../components/Gamepad'
+import { AutopilotPanel } from '../components/Autopilot'
 import { CountdownOverlay, DeliveryPanel, ReleaseFlash } from '../components/Delivery'
 import { EnginePanel } from '../components/Engine'
 import { ForcePrompt, ReplayBar } from '../components/Replay'
@@ -59,6 +62,7 @@ function FlyRail() {
         <button className={`rb ${station.map3d ? 'on' : ''}`} title={tr('Mapa inclinado com os obstáculos do LiDAR em 3D; gire com o botão direito ou com dois dedos')} onClick={() => { station.map3d = !station.map3d; station.emit('ui') }}><Icon.cube />{tr('3D')}</button>
         <button className={`rb ${station.deliveryOpen ? 'on' : ''}`} onClick={() => { station.deliveryOpen = !station.deliveryOpen; station.emit('ui') }}><Icon.drop />{tr('Entrega')}</button>
         <button className={`rb ${station.engineOpen ? 'on' : ''}`} title={tr('Painel do motor: rotação, temperaturas, combustível, bateria e gerador')} onClick={() => { station.engineOpen = !station.engineOpen; station.emit('ui') }}><Icon.engine />{tr('Motor')}</button>
+        <button className={`rb ${station.apOpen ? 'on' : ''} ${station.telem?.ap?.engaged ? 'apon' : ''}`} title={tr('Piloto automático: rumo, altitude, velocidade vertical e velocidade, como num avião')} onClick={() => { station.apOpen = !station.apOpen; station.emit('ui') }}><Icon.yoke />{tr('A/P')}</button>
         <button className="rb" onClick={() => station.mapApi?.zoomBy(1)}><Icon.plus />{tr('Zoom')}</button>
         <button className="rb" onClick={() => station.mapApi?.zoomBy(-1)}><Icon.minus />{tr('Zoom')}</button>
       </div>
@@ -76,9 +80,10 @@ function Val({ label, value, unit }: { label: string; value: string; unit?: stri
 }
 
 function FlyPanel() {
-  useChannels('telemetry', 'params', 'map')
+  useChannels('telemetry', 'params', 'map', 'ui')
+  const tilt = station.gimbalPitch
+  const setTilt = (v: number) => { station.gimbalPitch = v; station.emit('ui') }
   const [collapsed, setCollapsed] = useState(innerWidth < 760 || (innerWidth < 1180 && matchMedia('(pointer: coarse)').matches))
-  const [tilt, setTilt] = useState(-30)
   const t = station.telem
   const home = t?.home
   const dHome = t && home ? distance(home, t) : NaN
@@ -125,7 +130,7 @@ function FlyPanel() {
           </div>
         </Section>
         <Section title={tr('Pilotagem')} icon={<Icon.sticks />}>
-          <div className="db"><Sticks /></div>
+          <div className="db"><PadStatus /><Sticks /></div>
         </Section>
         <Section title={tr('LiDAR')} icon={<Icon.lidar />}>
           <div className="db tight">
@@ -170,21 +175,10 @@ function FlyPanel() {
 
 function CameraPip() {
   useChannels('ui')
-  const url = station.settings.videoUrl
   const big = station.videoBig
-  const img = useRef<HTMLImageElement>(null)
-  // Erro vale só para a URL que falhou; trocar o endereço tenta de novo.
-  const [failedUrl, setFailedUrl] = useState<string | null>(null)
-  const err = failedUrl === url
-  const setErr = () => setFailedUrl(url)
-  const isVideo = /\.(m3u8|mp4|webm)(\?|$)/i.test(url)
   return (
     <button className={`pip ${big ? 'big' : ''}`} onClick={() => { station.videoBig = !big; station.emit('ui') }} title={big ? tr('Reduzir') : tr('Ampliar vídeo')}>
-      {url && !err ? (
-        isVideo ? <video src={url} autoPlay muted playsInline onError={setErr} /> : <img ref={img} src={url} alt={tr('Vídeo da câmera')} onError={setErr} />
-      ) : (
-        <span className="novideo">{url ? tr('Sem sinal de vídeo') : tr('Sem vídeo configurado')}</span>
-      )}
+      <CameraFeed />
     </button>
   )
 }
@@ -194,7 +188,7 @@ function FlightTime() {
   return <div className="ftime"><span>{tr('Tempo de voo')}</span><b>{fmtTime(station.stats.flightS)}</b></div>
 }
 
-function Toast() {
+export function Toast() {
   useChannels('log')
   const last = station.log.at(-1)
   const [expired, setExpired] = useState(0)
@@ -221,6 +215,7 @@ export function FlyView() {
       <FlightTime />
       <DeliveryPanel />
       <EnginePanel />
+      <AutopilotPanel />
       <ReleaseFlash />
       <CountdownOverlay />
       <Toast />

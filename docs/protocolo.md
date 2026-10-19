@@ -15,7 +15,7 @@ sem alteração a partir do computador de bordo (`ros2_ws/`, nó `map_link`).
 | `type`            | Quando                     | Conteúdo |
 |-------------------|----------------------------|----------|
 | `hello`           | ao conectar                | `bridge`, `version`, `mavlink` (endereço), `replay` (bool), `log_file` (onde está gravando, ou `null`) |
-| `telemetry`       | 10 Hz                      | estado completo do veículo (ver `gcs-web/src/types.ts` → `Telemetry`); `vehicle_class` (`copter`, `heli`, `plane`, `vtol` ou `rover`) diz qual tabela de modos vale |
+| `telemetry`       | 10 Hz                      | estado completo do veículo (ver `gcs-web/src/types.ts` → `Telemetry`); `vehicle_class` (`copter`, `heli`, `plane`, `vtol` ou `rover`) diz qual tabela de modos vale; `ap` é o estado do piloto automático (abaixo) |
 | `statustext`      | a cada STATUSTEXT          | `severity` (0–7), `text` |
 | `ack`             | a cada COMMAND_ACK         | `command` (ex.: `MAV_CMD_NAV_TAKEOFF`), `result` (ex.: `MAV_RESULT_ACCEPTED`) |
 | `param`           | a cada PARAM_VALUE         | `id`, `value`, `index`, `count` |
@@ -48,6 +48,7 @@ sem alteração a partir do computador de bordo (`ros2_ws/`, nó `map_link`).
 | `reboot`          | — | `MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN`; só desarmado |
 | `fence_upload`    | `fence` (formato de `vehicle_fence`), `enable?` (padrão true) | protocolo de missão com `mission_type = FENCE`: um item `NAV_FENCE_POLYGON_VERTEX_INCLUSION/EXCLUSION` por vértice (param1 = nº de vértices) e `NAV_FENCE_CIRCLE_*` (param1 = raio); `FENCE_TYPE \|= 4` e `FENCE_ENABLE = 1` |
 | `fence_download`  | — | REQUEST_LIST/REQUEST_INT com `mission_type = FENCE`; responde com `vehicle_fence` |
+| `autopilot`       | `engage?`, `lateral?` (`hdg`, `nav`), `vertical?` (`alt`, `vs`), `hdg?` (graus), `alt?` (ALT SEL, m acima do home), `vs?` (m/s), `spd?` (m/s), `spd_on?` | piloto automático (abaixo): modo GUIDED (ou AUTO no NAV) e os alvos de cada tipo de veículo |
 | `maintenance_get` | — | pede um `maintenance` |
 | `maintenance_config` | `airframe`, `batteries` (`id`, `name`, `cycles`, `max_cycles`, `retired`), `active_battery`, `tasks` (`id`, `name`, `every_h`, `every_flights`) | substitui a configuração (totais e histórico ficam) |
 | `maintenance_done`| `task`, `note?` | zera a contagem da tarefa e anota |
@@ -117,6 +118,26 @@ Sensores sem mensagem própria entram por `NAMED_VALUE_FLOAT` (script Lua), com 
 
 O tipo de motor é detectado assim (ou escolhido em **Configurar → Motor**): `TURB_ST` ou rotação da EFI acima
 de 25 000 rpm → turbina; outra EFI → combustão; senão, elétrico. O gerador aparece em qualquer tipo.
+
+### Piloto automático
+
+A ponte faz o papel do painel de modos de um avião (MCP). Estado em `telemetry.ap`: `engaged`, `lateral`
+(`hdg` ou `nav`), `vertical` (`alt`, `vs` ou `nav`), `hdg` (HDG SEL), `alt_sel` (ALT SEL), `alt_hold` (o que o
+ALT segura), `vs`, `spd`, `spd_on` e `message` (por que desligou sozinho; `null` se foi o operador).
+
+* Liga só em voo (armado, acima de 2 m), segurando o rumo, a altitude e a velocidade atuais. Os valores podem
+  ser escolhidos antes de ligar.
+* **HDG** voa o rumo selecionado; **NAV** segue a missão (modo AUTO, altitudes da missão); **ALT** segura a
+  altitude de quando foi apertado; **V/S** sobe ou desce até a ALT SEL no ritmo escolhido e vira ALT ao chegar
+  (±0,5 m no multirrotor, ±2 m no avião); **SPD** (avião) mantém a velocidade escolhida, senão `AIRSPEED_CRUISE`.
+* Avião e VTOL em voo horizontal: modo GUIDED e `COMMAND_INT` `MAV_CMD_GUIDED_CHANGE_HEADING` (rumo, aceleração
+  lateral 6 m/s²), `_ALTITUDE` (relativa ao home, ritmo = V/S ou 0 no ALT) e `_SPEED` (velocidade do ar), do
+  ArduPlane 4.5 em diante. Reenviados a cada 3 s.
+* Multirrotor e helicóptero: modo GUIDED e `SET_POSITION_TARGET_LOCAL_NED` a 5 Hz com velocidade
+  (norte/leste no rumo, vertical por um controle proporcional limitado ao V/S ou a 2,5 m/s) e rumo.
+* Desliga sozinho, com `error` "piloto automático desligado: …", se o veículo sair do modo esperado por mais de
+  2,5 s (rádio, failsafe, outra estação), desarmar ou perder a conexão. Desligado pelo operador, a ponte põe o
+  veículo em LOITER (multirrotor segura a posição, avião circula).
 
 ### Pré-voo e reprodução
 

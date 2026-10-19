@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { AlertTracker, bands, buildPanel, DEFAULT_ENGINE, detectKind, issues, level, LIMIT_DEFS, scaleLimit } from './engine'
+import { t } from './i18n'
 import type { Propulsion, Telemetry } from '../types'
 
 const prop = (p: Partial<Propulsion> = {}): Propulsion => ({ batteries: [], escs: [], efi: null, generator: null, rpm: [null, null], named: {}, ...p })
@@ -64,7 +65,8 @@ describe('motor', () => {
   it('turbina: estado e tanque pela EFI', () => {
     const p = buildPanel(tel(prop({ efi: efi(110_000, null, 810), named: { TURB_ST: 4 } })), { ...DEFAULT_ENGINE, tankL: 2 })
     expect(p.kind).toBe('jet')
-    expect(p.state?.text).toBe('FUNCIONANDO')
+    // Na língua do ambiente: o CI roda em inglês.
+    expect(p.state?.text).toBe(t('FUNCIONANDO'))
     expect(p.fuelPct).toBeCloseTo(80)
     expect(issues(p).some((i) => i.key === 'egtJet:' && i.level === 'crit')).toBe(true)
   })

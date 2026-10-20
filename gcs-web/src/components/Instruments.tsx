@@ -5,6 +5,7 @@ import { station } from '../lib/store'
 import { useCanvasLoop } from '../lib/canvas'
 import type { Telemetry } from '../types'
 import { t as tr } from '../lib/i18n'
+import { soundSpeed } from '../lib/navlog'
 
 const DEG = Math.PI / 180
 /** Ciano dos valores selecionados no piloto automático (como no avião). */
@@ -34,7 +35,7 @@ function drawAttitude(ctx: CanvasRenderingContext2D, w: number, h: number, t: Te
   ctx.font = F(400, 11 * k)
   ctx.fillText(`${Math.round(alt + span)} m`, tx - 18, 18 * k)
   ctx.fillText(`${Math.round(alt - span)} m`, tx - 18, h - 18 * k)
-  ctx.font = F(400, 30 * k); ctx.fillText(alt.toFixed(0), tx - 34 * k, cy + 1)
+  ctx.font = F(400, (Math.abs(alt) >= 10_000 ? 23 : 30) * k); ctx.fillText(alt.toFixed(0), tx - 34 * k, cy + 1)
   ctx.font = F(400, 11 * k); ctx.fillText('m', tx - 20 * k, cy + 6 * k)
   // horizonte
   ctx.save()
@@ -74,29 +75,42 @@ function drawAttitude(ctx: CanvasRenderingContext2D, w: number, h: number, t: Te
   ctx.strokeStyle = '#16181c'; ctx.lineWidth = 4; ctx.beginPath(); ctx.arc(cx, cy, R + 1, 0, 7); ctx.stroke()
 }
 
+/** Fundos de escala do velocímetro (km/h): do multirrotor ao hipersônico. */
+const SPEED_SCALES = [80, 200, 400, 1000, 2500, 8000]
+
+/** Escala que cabe a velocidade atual e a de cruzeiro do avião, com folga. */
+export function speedScale(kmh: number, cruiseKmh = 0): number {
+  const need = Math.max(kmh * 1.05, cruiseKmh * 1.25)
+  return SPEED_SCALES.find((s) => s >= need) ?? SPEED_SCALES.at(-1)!
+}
+
 function drawSpeed(ctx: CanvasRenderingContext2D, w: number, h: number, t: Telemetry | null) {
   const cx = w / 2, cy = h / 2, R = w / 2 - 6, k = w / 150
   const kmh = (t?.groundspeed ?? 0) * 3.6
-  const A = (v: number) => (135 + (Math.max(0, Math.min(80, v)) / 80) * 270) * DEG
+  const S = speedScale(kmh, (station.params.get('AIRSPEED_CRUISE') ?? 0) * 3.6)
+  const A = (v: number) => (135 + (Math.max(0, Math.min(S, v)) / S) * 270) * DEG
   for (let i = 0; i < 60; i++) {
     const tt = i / 60
     const c = tt < 0.5 ? [47 + tt * 2 * 198, 207 - tt * 2 * 27, 95 - tt * 2 * 37] : [245 - (tt - 0.5) * 2 * 6, 180 - (tt - 0.5) * 2 * 106, 58]
     ctx.strokeStyle = `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`
     ctx.lineWidth = 5 * k
-    ctx.beginPath(); ctx.arc(cx, cy, R - 3 * k, A(tt * 80), A(((i + 1) / 60) * 80) + 0.01); ctx.stroke()
+    ctx.beginPath(); ctx.arc(cx, cy, R - 3 * k, A(tt * S), A(((i + 1) / 60) * S) + 0.01); ctx.stroke()
   }
   ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.3; ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
   ctx.font = F(400, 11 * k)
-  for (let v = 0; v <= 80; v += 5) {
-    const a = A(v), l = v % 10 === 0 ? 9 * k : 5 * k
+  const step = S / 16
+  for (let i = 0; i <= 16; i++) {
+    const v = i * step, a = A(v), l = i % 2 === 0 ? 9 * k : 5 * k
     ctx.beginPath(); ctx.moveTo(cx + Math.cos(a) * (R - 9 * k), cy + Math.sin(a) * (R - 9 * k)); ctx.lineTo(cx + Math.cos(a) * (R - 9 * k - l), cy + Math.sin(a) * (R - 9 * k - l)); ctx.stroke()
-    if (v % 10 === 0 && k > 0.8) ctx.fillText(String(v), cx + Math.cos(a) * (R - 30 * k), cy + Math.sin(a) * (R - 30 * k))
+    if (i % 2 === 0 && k > 0.8) ctx.fillText(v >= 1000 ? `${+(v / 1000).toFixed(1)}k` : String(Math.round(v)), cx + Math.cos(a) * (R - 30 * k), cy + Math.sin(a) * (R - 30 * k))
   }
   const a = A(kmh)
   ctx.strokeStyle = '#3a78f2'; ctx.lineWidth = 3
   ctx.beginPath(); ctx.moveTo(cx + Math.cos(a) * (R - 40 * k), cy + Math.sin(a) * (R - 40 * k)); ctx.lineTo(cx + Math.cos(a) * (R - 8 * k), cy + Math.sin(a) * (R - 8 * k)); ctx.stroke()
-  ctx.fillStyle = '#fff'; ctx.font = F(400, 28 * k); ctx.fillText(String(Math.round(kmh)), cx, cy + 2 * k)
-  ctx.font = F(500, 10 * k); ctx.fillText('KM / H', cx, cy + R * 0.62)
+  ctx.fillStyle = '#fff'; ctx.font = F(400, (kmh >= 1000 ? 23 : 28) * k); ctx.fillText(String(Math.round(kmh)), cx, cy + 2 * k)
+  // Perto do som e acima dele, o Mach (velocidade no ar sobre a do som na altitude).
+  const mach = t ? t.airspeed / soundSpeed(t.alt_msl) : 0
+  ctx.font = F(500, 10 * k); ctx.fillText(mach >= 0.5 ? `KM / H · M${mach.toFixed(2)}` : 'KM / H', cx, cy + R * 0.62)
 }
 
 function drawCompass(ctx: CanvasRenderingContext2D, w: number, h: number, t: Telemetry | null) {

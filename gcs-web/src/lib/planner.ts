@@ -179,8 +179,16 @@ export function planRoute(c: ChartIndex | null, req: PlanRequest): PlannedRoute 
     if (l) l.push(e)
     else adj.set(from, [e])
   }
-  for (const s of c.pack.airways) {
+  // Aerovias inferior e superior no mesmo trecho: fica uma só (a do nível de cruzeiro), para a rota
+  // não alternar entre as duas a cada fixo.
+  const preferUpper = req.cruise >= FL245
+  const segs = [...c.pack.airways].sort((x, y) => Number(x.upper !== preferUpper) - Number(y.upper !== preferUpper))
+  const seen = new Set<string>()
+  for (const s of segs) {
     if (!(both || (s.upper ? upper : lower))) continue
+    const pair = s.from < s.to ? `${s.from}|${s.to}` : `${s.to}|${s.from}`
+    if (seen.has(pair)) continue
+    seen.add(pair)
     const a0 = s.coords[0], b0 = s.coords.at(-1)!
     const ka = key(s.from, a0), kb = key(s.to, b0)
     const a = { lat: a0[1], lon: a0[0] }, b = { lat: b0[1], lon: b0[0] }
@@ -197,16 +205,15 @@ export function planRoute(c: ChartIndex | null, req: PlanRequest): PlannedRoute 
     if (v === undefined) blocked.set(e.seg, (v = restrictedOn(c, e.a, e.b, req.cruise, req.ground).length > 0))
     return v
   }
-  // Entrada e saída da rede por DCT: os poucos fixos de aerovia mais próximos da partida e do destino
-  // (com muitos, o DCT cortaria caminho até o meio da aerovia).
+  // Entrada e saída da rede por DCT: os fixos de aerovia mais próximos da partida e do destino, até `join`.
   const S = '#start', E = '#end'
   const nearest = (q: LatLon, k: number) => [...pos.entries()]
     .map(([id, v]) => ({ id, d: distance(q, v.at) }))
     .filter((x) => x.d <= req.join)
     .sort((x, y) => x.d - y.d)
     .slice(0, k)
-  for (const { id, d } of nearest(req.from, 4)) add(S, { to: id, seg: null, dist: d, a: req.from, b: pos.get(id)!.at })
-  for (const { id, d } of nearest(req.to, 4)) add(id, { to: E, seg: null, dist: d, a: pos.get(id)!.at, b: req.to })
+  for (const { id, d } of nearest(req.from, 10)) add(S, { to: id, seg: null, dist: d, a: req.from, b: pos.get(id)!.at })
+  for (const { id, d } of nearest(req.to, 10)) add(id, { to: E, seg: null, dist: d, a: pos.get(id)!.at, b: req.to })
 
   // Dijkstra com parada no destino.
   const best = new Map<string, number>([[S, 0]])
@@ -218,8 +225,9 @@ export function planRoute(c: ChartIndex | null, req: PlanRequest): PlannedRoute 
     if (u === E) break
     if (g > (best.get(u) ?? Infinity)) continue
     for (const e of adj.get(u) ?? []) {
-      // DCT de entrada/saída custa 5% a mais: com custo parecido, fica a aerovia (como um despachante faria).
-      const ng = g + cost(e.a, e.b, e.dist) * (e.seg ? 1 : 1.05)
+      // DCT de entrada/saída custa 15% a mais: com custo parecido, fica a aerovia (como um despachante faria)
+      // e o DCT não corta caminho até o meio dela.
+      const ng = g + cost(e.a, e.b, e.dist) * (e.seg ? 1 : 1.15)
       if (ng >= (best.get(e.to) ?? Infinity) || isBlocked(e)) continue
       best.set(e.to, ng)
       prev.set(e.to, { from: u, e })
@@ -246,4 +254,73 @@ export function planRoute(c: ChartIndex | null, req: PlanRequest): PlannedRoute 
   }
   const sum = summarize(req, mode, points)
   return { objective: req.objective, direct: false, mode, points, text: routeText(req.from.id, points), ...sum, crosses: [], detour: sum.dist / Math.max(1, distance(req.from, req.to)) }
+}
+
+// ---------- pelos waypoints do plano ----------
+
+/** Waypoint do operador (lat, lon, altitude na referência do plano e o resto que ele carrega). */
+export interface UserPoint extends LatLon { alt: number; name?: string }
+
+export interface ThroughLeg {
+  from: string
+  to: string
+  /** Rota da perna: aerovias, DCT (sem caminho ou volta grande demais) ou direto por escolha. */
+  how: 'airways' | 'dct'
+  text: string
+  dist: number
+  /** Por que ficou DCT, se ficou. */
+  why?: 'no-path' | 'detour'
+  /** Volta da melhor rota pelas aerovias (× o direto), quando ficou direto por isso. */
+  detour?: number
+}
+
+export interface ThroughResult<T extends UserPoint> {
+  /** Plano novo: os pontos do operador (como eram) e os fixos das aerovias entre eles. */
+  items: (T | (LatLon & { alt: number; name: string; via: string }))[]
+  legs: ThroughLeg[]
+  /** Fixos acrescentados. */
+  added: number
+}
+
+/**
+ * Liga os waypoints do plano pelas aerovias, perna a perna, do home ao último. Os pontos do
+ * operador ficam (com altitude, entrega e nome); os fixos entre eles herdam a altitude do ponto
+ * seguinte. Uma perna fica direta quando não há caminho ou quando ele passa de `maxDetour` vezes a
+ * distância direta.
+ */
+export function routeThrough<T extends UserPoint>(
+  c: ChartIndex, start: LatLon, pts: T[], name: (i: number) => string,
+  req: Omit<PlanRequest, 'from' | 'to' | 'direct' | 'cruise'> & { toMsl: (alt: number) => number; maxDetour: number },
+): ThroughResult<T> {
+  const items: ThroughResult<T>['items'] = []
+  const legs: ThroughLeg[] = []
+  let prev: Place = { id: 'HOME', kind: 'home', lat: start.lat, lon: start.lon }
+  let added = 0
+  pts.forEach((p, i) => {
+    const id = p.name ?? name(i)
+    const to: Place = { id, kind: 'user', lat: p.lat, lon: p.lon }
+    const d = distance(prev, to)
+    const one = (airways: PlanRequest['airways']) => planRoute(c, { ...req, airways, from: prev, to, direct: false, cruise: req.toMsl(p.alt) })
+    let r = d < 1000 ? null : one(req.airways)
+    // As aerovias do nível (só superiores lá em cima) não servem: tenta com todas e fica com a menor volta.
+    if (d >= 1000 && req.airways !== 'both' && (!r || r.detour > req.maxDetour)) {
+      const all = one('both')
+      if (all && (!r || all.detour < r.detour)) r = all
+    }
+    // Um caminho que só pula de fixo em fixo por DCT não usa aerovia nenhuma: fica direto.
+    const why = !r || r.points.every((q) => q.via === 'DCT') ? 'no-path' : r.detour > req.maxDetour ? 'detour' : undefined
+    if (r && !why) {
+      for (const q of r.points.slice(0, -1)) {
+        items.push({ lat: q.lat, lon: q.lon, alt: p.alt, name: q.id, via: q.via })
+        added++
+      }
+      legs.push({ from: prev.id, to: id, how: 'airways', text: r.text, dist: r.dist })
+      items.push({ ...p, name: id, via: r.points.at(-1)!.via })
+    } else {
+      legs.push({ from: prev.id, to: id, how: 'dct', text: `${prev.id} DCT ${id}`, dist: d, why: d < 1000 ? undefined : why, detour: r?.detour })
+      items.push({ ...p, name: id, via: 'DCT' })
+    }
+    prev = to
+  })
+  return { items, legs, added }
 }

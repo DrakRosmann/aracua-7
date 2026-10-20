@@ -712,3 +712,12 @@ textarea.route { width: 100%; resize: vertical; background: var(--input); color:
 .option code { font-size: 11px; color: var(--code); word-break: break-word; line-height: 1.5; }
 .num small { color: var(--muted); font-size: 11.5px; }
 .num select { background: var(--input); border: 1px solid rgb(var(--ink) / 0.14); border-radius: 4px; padding: 5px 8px; font-size: 12.5px; }
+/* Combustível: mostrador à esquerda do velocímetro e indicador na barra de cima. */
+#cvFuel { right: 452px; bottom: 16px; width: 150px; height: 150px; }
+#cvFuel.fuelcrit { box-shadow: 0 0 0 3px var(--red), 0 6px 18px rgba(0, 0, 0, 0.55); animation: blink 0.8s steps(2) infinite; }
+.stat.fuel { gap: 5px; }
+.stat.fuel svg { width: 18px; height: 18px; }
+.stat.fuel.warn { color: var(--amber); } .stat.fuel.crit { color: var(--red); }
+.stat.fuel .fuel-end { font-size: 11px; color: var(--muted); }
+@media (max-width: 1280px) { #cvFuel { right: 292px; bottom: 176px; width: 110px; height: 110px; } }
+@media (max-width: 760px) { #cvFuel { display: none; } }

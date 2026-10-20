@@ -50,6 +50,14 @@ struct Args {
     /// Motor: electric (elétrico), combustion (combustão), jet (turbina) ou hybrid (elétrico com gerador)
     #[arg(long, default_value = "electric", value_parser = parse_propulsion)]
     propulsion: Propulsion,
+    /// Aeronave: small (avião pequeno, padrão), piston (pistão de longo alcance), jet (jato, Mach 0,78),
+    /// supersonic (Mach 2) ou hypersonic (Mach 6). As grandes são sempre avião, com o motor delas.
+    #[arg(long, default_value = "small", value_parser = parse_airframe)]
+    airframe: Airframe,
+    /// Acelera o tempo da simulação (1 a 20): voos de horas passam em minutos. Pensado para avião;
+    /// os relógios de parede (telemetria, tempo de voo na estação) continuam no tempo real.
+    #[arg(long, default_value_t = 1.0, value_parser = parse_time_scale)]
+    time_scale: f64,
     /// Endereço do vídeo da câmera simulada (MJPEG em http://ENDEREÇO/video.mjpg); "off" desliga
     #[arg(long, default_value = "127.0.0.1:8090")]
     camera: String,
@@ -88,6 +96,103 @@ fn parse_propulsion(s: &str) -> Result<Propulsion, String> {
     }
 }
 
+fn parse_time_scale(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if (1.0..=20.0).contains(&v) => Ok(v),
+        _ => Err(format!("aceleração inválida: {s} (de 1 a 20)")),
+    }
+}
+
+fn parse_airframe(s: &str) -> Result<Airframe, String> {
+    match s {
+        "small" => Ok(Airframe::Small),
+        "piston" => Ok(Airframe::Piston),
+        "jet" => Ok(Airframe::Jet),
+        "supersonic" => Ok(Airframe::Supersonic),
+        "hypersonic" => Ok(Airframe::Hypersonic),
+        _ => Err(format!("aeronave inválida: {s} (use small, piston, jet, supersonic ou hypersonic)")),
+    }
+}
+
+/// Aeronaves do simulador: o avião pequeno de sempre e as de longo alcance e alta velocidade.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Airframe {
+    Small,
+    Piston,
+    Jet,
+    Supersonic,
+    Hypersonic,
+}
+
+/// Desempenho de uma aeronave simulada (velocidades verdadeiras, m/s; razões em m/s; litros).
+#[derive(Clone, Copy, Debug)]
+struct Perf {
+    stall: f64,
+    cruise: f64,
+    bank: f64,
+    climb: f64,
+    descent: f64,
+    /// Aceleração máxima no ar (m/s²); infinita = resposta suave de sempre.
+    accel: f64,
+    /// Tanque (L) e consumo em cruzeiro (L/h); 0 = usa o motor pequeno.
+    tank_l: f64,
+    flow_lph: f64,
+    /// Limites de velocidade por altitude: (abaixo de, no máximo).
+    limits: &'static [(f64, f64)],
+}
+
+impl Airframe {
+    fn big(self) -> bool {
+        self != Airframe::Small
+    }
+    fn perf(self) -> Perf {
+        // 250 kt abaixo de 10 000 ft; supersônicos só aceleram além do som lá em cima.
+        const JET: &[(f64, f64)] = &[(3048.0, 128.0)];
+        const FAST: &[(f64, f64)] = &[(3048.0, 128.0), (9000.0, 280.0)];
+        const HYPER: &[(f64, f64)] = &[(3048.0, 128.0), (9000.0, 280.0), (20_000.0, 900.0)];
+        match self {
+            Airframe::Small => Perf { stall: 11.0, cruise: 18.0, bank: 40.0, climb: 4.0, descent: 4.0, accel: f64::INFINITY, tank_l: 0.0, flow_lph: 0.0, limits: &[] },
+            Airframe::Piston => Perf { stall: 28.0, cruise: 55.0, bank: 30.0, climb: 4.0, descent: 5.0, accel: 1.5, tank_l: 150.0, flow_lph: 28.0, limits: &[] },
+            Airframe::Jet => Perf { stall: 65.0, cruise: 230.0, bank: 25.0, climb: 15.0, descent: 12.0, accel: 2.5, tank_l: 8000.0, flow_lph: 2600.0, limits: JET },
+            Airframe::Supersonic => Perf { stall: 85.0, cruise: 590.0, bank: 30.0, climb: 40.0, descent: 25.0, accel: 6.0, tank_l: 100_000.0, flow_lph: 22_000.0, limits: FAST },
+            Airframe::Hypersonic => Perf { stall: 120.0, cruise: 1810.0, bank: 20.0, climb: 120.0, descent: 80.0, accel: 15.0, tank_l: 40_000.0, flow_lph: 45_000.0, limits: HYPER },
+        }
+    }
+    /// Parâmetros do ArduPlane que mudam com a aeronave (raios cabem num int16, como no firmware).
+    fn params(self) -> Vec<(&'static str, f32)> {
+        let p = self.perf();
+        let (tkoff, rtl, wp, loiter) = match self {
+            Airframe::Small => (50.0, 80.0, 30.0, 70.0),
+            Airframe::Piston => (150.0, 1000.0, 200.0, 400.0),
+            Airframe::Jet => (300.0, 3000.0, 2000.0, 8000.0),
+            Airframe::Supersonic => (500.0, 6000.0, 10_000.0, 30_000.0),
+            Airframe::Hypersonic => (500.0, 9000.0, 30_000.0, 32_000.0),
+        };
+        let mut v = vec![("AIRSPEED_CRUISE", p.cruise as f32), ("AIRSPEED_MIN", (p.stall + 1.0) as f32), ("TKOFF_ALT", tkoff), ("RTL_ALTITUDE", rtl), ("WP_RADIUS", wp), ("WP_LOITER_RAD", loiter)];
+        if self.big() {
+            // A geocerca circular de 1,5 km do avião pequeno não faz sentido num voo de centenas de quilômetros.
+            v.push(("FENCE_ENABLE", 0.0));
+        }
+        v
+    }
+    fn propulsion(self) -> Option<Propulsion> {
+        match self {
+            Airframe::Small => None,
+            Airframe::Piston => Some(Propulsion::Combustion),
+            _ => Some(Propulsion::Jet),
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Airframe::Small => "avião",
+            Airframe::Piston => "avião a pistão de longo alcance",
+            Airframe::Jet => "jato, Mach 0,78",
+            Airframe::Supersonic => "supersônico, Mach 2",
+            Airframe::Hypersonic => "hipersônico, Mach 6",
+        }
+    }
+}
+
 fn parse_class(s: &str) -> Result<VehicleClass, String> {
     match VehicleClass::parse(s) {
         Some(VehicleClass::Rover) | None => Err(format!("tipo inválido: {s} (use copter, heli, plane ou vtol)")),
@@ -97,10 +202,6 @@ fn parse_class(s: &str) -> Result<VehicleClass, String> {
 
 const HOME_MSL: f32 = 760.0;
 const G: f64 = 9.81;
-/// Inclinação máxima nas curvas do avião.
-const MAX_BANK_DEG: f64 = 40.0;
-/// Velocidade abaixo da qual o avião perde sustentação.
-const STALL_MS: f64 = 11.0;
 const LIDAR_RANGE: f64 = 90.0;
 /// Capacidade da bateria simulada.
 const BATT_MAH: f64 = 5000.0;
@@ -221,6 +322,12 @@ fn polygon_breach(f: &aracua_bridge::fence::Fence, (lat, lon): (f64, f64)) -> Op
 
 struct Vehicle {
     class: VehicleClass,
+    /// Desempenho da aeronave (asa fixa).
+    perf: Perf,
+    /// Sem empuxo (tanque vazio): o avião planeia.
+    no_thrust: bool,
+    /// Demanda do motor em relação ao cruzeiro (aeronaves grandes): manda no consumo.
+    demand: f64,
     /// Velocidade em relação ao ar (asa fixa).
     airspeed: f64,
     /// Centro do círculo em LOITER/GUIDED (asa fixa).
@@ -416,24 +523,29 @@ fn main() -> anyhow::Result<()> {
     let to_ll = move |e: f64, n: f64| (home_lat + n / 111_320.0, home_lon + e / (111_320.0 * (home_lat * PI / 180.0).cos()));
     let to_en = move |lat: f64, lon: f64| ((lon - home_lon) * 111_320.0 * (home_lat * PI / 180.0).cos(), (lat - home_lat) * 111_320.0);
 
-    let class = args.vehicle;
+    let class = if args.airframe.big() { VehicleClass::Plane } else { args.vehicle };
+    let propulsion = args.airframe.propulsion().unwrap_or(args.propulsion);
+    if args.airframe.big() && (args.vehicle != VehicleClass::Plane && args.vehicle != VehicleClass::Copter || propulsion != args.propulsion && args.propulsion != Propulsion::Electric) {
+        eprintln!("aeronave {}: voa como avião com o motor dela", args.airframe.label());
+    }
     let common: &[(&str, f32)] = &[
         ("FENCE_ENABLE", 1.0), ("FENCE_RADIUS", 400.0), ("FENCE_ACTION", 1.0), ("FENCE_TYPE", 7.0),
         ("BATT_LOW_MAH", 750.0), ("BATT_FS_LOW_ACT", 2.0), ("FS_GCS_ENABLE", 1.0),
         ("AVOID_ENABLE", 7.0), ("AVOID_DIST_MAX", 9.0),
     ];
     // Parâmetros com os nomes de cada firmware.
-    let specific: &[(&str, f32)] = if class.fixed_wing() {
-        &[
-            ("AIRSPEED_CRUISE", 18.0), ("AIRSPEED_MIN", 12.0), ("TKOFF_ALT", 50.0), ("RTL_ALTITUDE", 80.0),
-            ("WP_RADIUS", 30.0), ("WP_LOITER_RAD", 70.0), ("FENCE_RADIUS", 1500.0),
+    let specific: Vec<(&str, f32)> = if class.fixed_wing() {
+        let mut v = vec![
+            ("FENCE_RADIUS", 1500.0),
             ("Q_ENABLE", if class == VehicleClass::Vtol { 1.0 } else { 0.0 }),
             ("Q_WP_SPEED", 500.0), ("Q_RTL_ALT", 3000.0),
-        ]
+        ];
+        v.extend(args.airframe.params());
+        v
     } else {
-        &[("RTL_ALT", 3000.0), ("WPNAV_SPEED", 900.0), ("LOIT_SPEED", 1200.0), ("PILOT_SPEED_UP", 400.0), ("PILOT_TKOFF_ALT", 4200.0)]
+        vec![("RTL_ALT", 3000.0), ("WPNAV_SPEED", 900.0), ("LOIT_SPEED", 1200.0), ("PILOT_SPEED_UP", 400.0), ("PILOT_TKOFF_ALT", 4200.0)]
     };
-    let params: HashMap<String, f32> = common.iter().chain(specific).map(|(k, v)| (k.to_string(), *v)).collect();
+    let params: HashMap<String, f32> = common.iter().chain(specific.iter()).map(|(k, v)| (k.to_string(), *v)).collect();
     let start_mode = match class {
         VehicleClass::Plane => "MANUAL",
         VehicleClass::Vtol => "QLOITER",
@@ -441,16 +553,22 @@ fn main() -> anyhow::Result<()> {
     };
 
     let v = Arc::new(Mutex::new(Vehicle {
-        class, airspeed: 0.0, orbit: None, leg_start: (0.0, 0.0), accel_step: None, mag_cal: None,
+        class, perf: args.airframe.perf(), no_thrust: false, demand: 0.0, airspeed: 0.0, orbit: None, leg_start: (0.0, 0.0), accel_step: None, mag_cal: None,
         e: 0.0, n: 0.0, alt: 0.0, ve: 0.0, vn: 0.0, vz: 0.0, hdg: 48.0, roll: 0.0, pitch: 0.0, yaw_rate: 0.0,
         armed: false, mode: modes::mode_number(class, start_mode).unwrap_or(0), target_alt: 0.0, guided_target: None, guided_hdg: None, guided_rate: 0.0, guided_speed: None, guided_vel: None, mission: vec![], fence_items: vec![], fence: Default::default(), incoming: None, cur: 0,
-        manual: (0.0, 0.0, 0.5, 0.0, Instant::now()), used_mah: 0.0, current: 0.0, load: 0.0, gen_a: 0.0, propulsion: args.propulsion, gimbal_pitch: -30.0, landed_t: 0.0, params,
+        manual: (0.0, 0.0, 0.5, 0.0, Instant::now()), used_mah: 0.0, current: 0.0, load: 0.0, gen_a: 0.0, propulsion, gimbal_pitch: -30.0, landed_t: 0.0, params,
         texts: vec![], boot: Instant::now(), servo: [0; 16], relay: [false; 8],
         present: [true, true, true, true, false, false], refill_at: [None; 6], loiter_until: None,
     }));
     let firmware = match class {
         VehicleClass::Copter => "ArduCopter simulado (multirrotor)",
         VehicleClass::Heli => "ArduCopter simulado (helicóptero)",
+        VehicleClass::Plane if args.airframe.big() => match args.airframe {
+            Airframe::Piston => "ArduPlane simulado (avião a pistão de longo alcance)",
+            Airframe::Jet => "ArduPlane simulado (jato, Mach 0,78)",
+            Airframe::Supersonic => "ArduPlane simulado (supersônico, Mach 2)",
+            _ => "ArduPlane simulado (hipersônico, Mach 6)",
+        },
         VehicleClass::Plane => "ArduPlane simulado (avião)",
         VehicleClass::Vtol => "ArduPlane simulado (VTOL / QuadPlane)",
         VehicleClass::Rover => "ArduRover simulado",
@@ -724,7 +842,9 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Laço de simulação a 50 Hz.
-    let dt = 0.02;
+    // Um passo a cada 20 ms de relógio; com --time-scale, cada passo simula mais tempo.
+    let tick_s = 0.02;
+    let dt = tick_s * args.time_scale;
     let mut tick: u64 = 0;
     let mut seen: HashSet<(i16, i16, i16)> = HashSet::new();
     let mut pending: Vec<mapframe::Voxel> = vec![];
@@ -733,7 +853,7 @@ fn main() -> anyhow::Result<()> {
     let mut first_map = true;
     let mut wind = (0.0f64, 0.0f64);
     let start = Instant::now();
-    let mut engine = Engine::new(args.propulsion, class);
+    let mut engine = Engine::new(propulsion, class, args.airframe.perf());
     // Câmera: o mesmo bairro do LiDAR, vista do drone.
     if args.camera != "off" {
         let bus = Arc::new(camera::Bus::default());
@@ -944,7 +1064,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         } else {
-            fixed_wing_step(&mut s, dt, &p, &to_en, &mut wind, args.wind, tick);
+            fixed_wing_step(&mut s, dt, &p, &to_en, &mut wind, args.wind, tick, home_lat);
         }
         let air = s.alt > 0.15;
         let sp = s.ve.hypot(s.vn);
@@ -960,7 +1080,9 @@ fn main() -> anyhow::Result<()> {
         };
         s.load += (demand - s.load) * 0.05;
         // Motor a combustível: a bateria só alimenta a aviônica. Híbrido: o gerador ajuda.
-        s.current = if s.propulsion.burns_fuel() { if s.armed { 2.4 } else { 0.8 } } else { s.load } - s.gen_a;
+        // Aeronave grande: o alternador do motor sustenta a aviônica enquanto ele gira.
+        s.current = if s.perf.tank_l > 0.0 { if s.armed && !s.no_thrust { 0.0 } else { 1.0 } }
+            else if s.propulsion.burns_fuel() { if s.armed { 2.4 } else { 0.8 } } else { s.load } - s.gen_a;
         s.used_mah = (s.used_mah + s.current * dt / 3.6).max(0.0);
         let soc = (1.0 - s.used_mah / BATT_MAH).clamp(0.0, 1.0);
         let returning = ["RTL", "LAND", "QRTL", "QLAND"].contains(&s.mode_name().as_str());
@@ -1046,17 +1168,18 @@ fn main() -> anyhow::Result<()> {
         let texts: Vec<_> = std::mem::take(&mut s.texts);
         let airspeed = if s.hovering() { s.ve.hypot(s.vn) } else { s.airspeed };
         let snap = (s.armed, s.mode, s.roll, s.pitch, s.hdg, s.yaw_rate, s.alt, s.ve, s.vn, s.vz, s.current, s.used_mah, s.cur, s.mission.len());
-        let (load, hovering) = (s.load, s.hovering());
+        let (load, hovering, demand) = (s.load, s.hovering(), s.demand);
         drop(s);
         let (armed, mode, roll, pitch, hdg, yaw_rate, alt, ve, vn, vz, current, used, cur, mlen) = snap;
         // ---- Motor e energia ----
         let soc = (1.0 - used / BATT_MAH).clamp(0.0, 1.0);
         let cells = engine.cells(soc, current);
         let pack_v: f64 = cells.iter().sum();
-        let (gen_a, note) = engine.step(dt, armed, load, hovering, current, pack_v);
+        let (gen_a, note) = engine.step(dt, armed, load, hovering, current, pack_v, demand);
         {
             let mut s = v.lock().unwrap();
             s.gen_a = gen_a;
+            s.no_thrust = engine.starved;
             if let Some(t) = note {
                 s.say(MavSeverity::MAV_SEVERITY_CRITICAL, t);
             }
@@ -1172,9 +1295,10 @@ fn main() -> anyhow::Result<()> {
                 lon: (lon * 1e7) as i32,
                 alt: ((HOME_MSL as f64 + alt) * 1000.0) as i32,
                 relative_alt: (alt * 1000.0) as i32,
-                vx: (vn * 100.0) as i16,
-                vy: (ve * 100.0) as i16,
-                vz: (-vz * 100.0) as i16,
+                // cm/s em int16: acima de ~327 m/s o campo satura (como no ArduPilot); a velocidade vale pelo VFR_HUD.
+                vx: (vn * 100.0).clamp(-32767.0, 32767.0) as i16,
+                vy: (ve * 100.0).clamp(-32767.0, 32767.0) as i16,
+                vz: (-vz * 100.0).clamp(-32767.0, 32767.0) as i16,
                 hdg: (hdg * 100.0) as u16,
             }));
             let gs = ve.hypot(vn) as f32;
@@ -1186,7 +1310,7 @@ fn main() -> anyhow::Result<()> {
         if tick == 1 || tick.is_multiple_of(1500) {
             eprintln!("[{:>5.0} s] {} {} alt {:.1} m, {} voxels mapeados", start.elapsed().as_secs_f64(), if armed { "armado" } else { "desarmado" }, modes::mode_name(class, mode), alt, seen.len());
         }
-        std::thread::sleep(Duration::from_secs_f64(dt).saturating_sub(t0.elapsed()));
+        std::thread::sleep(Duration::from_secs_f64(tick_s).saturating_sub(t0.elapsed()));
     }
 }
 
@@ -1211,8 +1335,11 @@ fn fixed_wing_step(
     wind: &mut (f64, f64),
     steady: (f64, f64),
     tick: u64,
+    home_lat: f64,
 ) {
-    let cruise = p("AIRSPEED_CRUISE", 18.0).max(STALL_MS + 3.0);
+    let pf = s.perf;
+    let stall = pf.stall;
+    let cruise = p("AIRSPEED_CRUISE", 18.0).max(stall + 3.0);
     let radius = p("WP_LOITER_RAD", 70.0).abs().max(25.0);
     let wp_radius = p("WP_RADIUS", 30.0).max(5.0);
     let rtl_alt = p("RTL_ALTITUDE", 80.0);
@@ -1221,18 +1348,21 @@ fn fixed_wing_step(
     let fresh = mt.elapsed() < Duration::from_millis(600);
     let on_ground = s.alt < 0.2;
 
-    let bearing = |s: &Vehicle, e: f64, n: f64| (e - s.e).atan2(n - s.n).to_degrees().rem_euclid(360.0);
+    // O plano local é equirretangular no home; longe dele, o leste encolhe com o cosseno da latitude.
+    // `k` converte leste do plano em metros de verdade aqui (≈ 1 perto do home).
+    let k = (home_lat + s.n / 111_320.0).to_radians().cos() / home_lat.to_radians().cos();
+    let bearing = |s: &Vehicle, e: f64, n: f64| ((e - s.e) * k).atan2(n - s.n).to_degrees().rem_euclid(360.0);
     // Rumo que mantém um círculo no sentido horário de raio r em torno de (ce, cn).
     let orbit_hdg = |s: &Vehicle, (ce, cn): (f64, f64), r: f64| {
-        let d = (s.e - ce).hypot(s.n - cn).max(0.1);
-        let radial = (s.e - ce).atan2(s.n - cn).to_degrees();
+        let d = ((s.e - ce) * k).hypot(s.n - cn).max(0.1);
+        let radial = ((s.e - ce) * k).atan2(s.n - cn).to_degrees();
         let corr = ((d - r) / r * 70.0).clamp(-70.0, 70.0);
         (radial + 90.0 + corr).rem_euclid(360.0)
     };
     // Centro de um círculo que começa à direita do avião, para entrar nele suavemente.
     let right_center = |s: &Vehicle, r: f64| {
         let h = (s.hdg + 90.0).to_radians();
-        (s.e + h.sin() * r, s.n + h.cos() * r)
+        (s.e + h.sin() * r / k, s.n + h.cos() * r)
     };
 
     let mut bank_cmd: Option<f64> = None;
@@ -1245,15 +1375,15 @@ fn fixed_wing_step(
     if s.armed {
         match mode.as_str() {
             "MANUAL" | "STABILIZE" | "FBWA" | "ACRO" | "TRAINING" => {
-                bank_cmd = Some(if fresh { my * MAX_BANK_DEG } else { 0.0 });
+                bank_cmd = Some(if fresh { my * pf.bank } else { 0.0 });
                 climb_cmd = Some(if fresh { -mx * 6.0 } else { 0.0 });
                 if fresh {
-                    target_speed = (STALL_MS + 1.0) + mz * (cruise * 1.4 - STALL_MS - 1.0);
+                    target_speed = (stall + 1.0) + mz * (cruise * 1.4 - stall - 1.0);
                 }
                 takeoff_roll = on_ground && fresh && mz > 0.6;
             }
             "FBWB" | "CRUISE" => {
-                bank_cmd = Some(if fresh { my * MAX_BANK_DEG } else { 0.0 });
+                bank_cmd = Some(if fresh { my * pf.bank } else { 0.0 });
                 if fresh {
                     s.target_alt = (s.target_alt - mx * 4.0 * dt).max(5.0);
                 }
@@ -1262,7 +1392,7 @@ fn fixed_wing_step(
             "TAKEOFF" => {
                 bank_cmd = Some(0.0);
                 takeoff_roll = true;
-                climb_cmd = Some(if s.airspeed > STALL_MS + 1.0 { 4.0 } else { 0.0 });
+                climb_cmd = Some(if s.airspeed > stall + 1.0 { pf.climb } else { 0.0 });
                 if !on_ground && s.alt >= s.target_alt - 1.0 {
                     s.go("LOITER");
                     s.say(MavSeverity::MAV_SEVERITY_INFO, "Decolagem concluída, circulando");
@@ -1294,7 +1424,7 @@ fn fixed_wing_step(
             }
             "RTL" => {
                 target_alt = rtl_alt;
-                let d = s.e.hypot(s.n);
+                let d = (s.e * k).hypot(s.n);
                 // Volta para casa e circula por cima (o ArduPlane não pousa sozinho no RTL).
                 target_hdg = Some(if d > radius * 1.6 { bearing(s, 0.0, 0.0) } else { orbit_hdg(s, (0.0, 0.0), radius) });
             }
@@ -1304,7 +1434,7 @@ fn fixed_wing_step(
                     Some(it) if it.command == MavCmd::MAV_CMD_NAV_TAKEOFF => {
                         bank_cmd = Some(0.0);
                         takeoff_roll = true;
-                        climb_cmd = Some(if s.airspeed > STALL_MS + 1.0 { 4.0 } else { 0.0 });
+                        climb_cmd = Some(if s.airspeed > stall + 1.0 { pf.climb } else { 0.0 });
                         if !on_ground && s.alt >= rel_z(&it) - 2.0 {
                             s.cur += 1;
                             s.leg_start = (s.e, s.n);
@@ -1319,8 +1449,8 @@ fn fixed_wing_step(
                         // linha perpendicular à perna no ponto.
                         let accept = if it.param2 > 0.0 { it.param2 as f64 } else { wp_radius };
                         let (ls_e, ls_n) = s.leg_start;
-                        let crossed = (te - s.e) * (te - ls_e) + (tn - s.n) * (tn - ls_n) < 0.0;
-                        if (te - s.e).hypot(tn - s.n) < accept || crossed {
+                        let crossed = (te - s.e) * (te - ls_e) * k * k + (tn - s.n) * (tn - ls_n) < 0.0;
+                        if ((te - s.e) * k).hypot(tn - s.n) < accept || crossed {
                             s.cur += 1;
                             s.leg_start = (te, tn);
                             s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
@@ -1330,7 +1460,7 @@ fn fixed_wing_step(
                     Some(it) if it.command == MavCmd::MAV_CMD_NAV_LAND => {
                         // Planeio até o ponto de toque, toca e freia na pista.
                         let (te, tn) = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
-                        let d = (te - s.e).hypot(tn - s.n);
+                        let d = ((te - s.e) * k).hypot(tn - s.n);
                         if on_ground {
                             bank_cmd = Some(0.0);
                             target_speed = 0.0;
@@ -1346,14 +1476,14 @@ fn fixed_wing_step(
                             } else {
                                 bank_cmd = Some(0.0);
                             }
-                            target_speed = STALL_MS + 3.0;
-                            climb_cmd = Some(if s.alt < 1.5 { -0.6 } else { (-(s.alt / (d.max(5.0) / (STALL_MS + 3.0)))).clamp(-3.0, -0.5) });
+                            target_speed = stall + 3.0;
+                            climb_cmd = Some(if s.alt < 1.5 { -0.6 } else { (-(s.alt / (d.max(5.0) / (stall + 3.0)))).clamp(-3.0, -0.5) });
                         }
                     }
                     Some(it) if it.command == MavCmd::MAV_CMD_NAV_LOITER_TIME => {
                         let c = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
                         target_alt = rel_z(&it);
-                        let d = (c.0 - s.e).hypot(c.1 - s.n);
+                        let d = ((c.0 - s.e) * k).hypot(c.1 - s.n);
                         if s.loiter_until.is_none() && d > radius * 1.3 {
                             target_hdg = Some(bearing(s, c.0, c.1));
                         } else {
@@ -1370,7 +1500,7 @@ fn fixed_wing_step(
                     Some(it) if it.command == MavCmd::MAV_CMD_NAV_LOITER_UNLIM => {
                         let c = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
                         target_alt = rel_z(&it);
-                        let d = (c.0 - s.e).hypot(c.1 - s.n);
+                        let d = ((c.0 - s.e) * k).hypot(c.1 - s.n);
                         target_hdg = Some(if d > radius * 1.3 { bearing(s, c.0, c.1) } else { orbit_hdg(s, c, radius) });
                     }
                     Some(it) if it.command == MavCmd::MAV_CMD_DO_SET_SERVO => {
@@ -1393,19 +1523,28 @@ fn fixed_wing_step(
         }
     }
 
+    // Limites de velocidade por altitude (250 kt embaixo; supersônico só lá em cima) e tanque vazio.
+    let alt_msl = s.alt + HOME_MSL as f64;
+    if let Some(&(_, max)) = pf.limits.iter().find(|(below, _)| alt_msl < *below) {
+        target_speed = target_speed.min(max);
+    }
+    if s.no_thrust {
+        target_speed = stall * 1.3;
+    }
     // Velocidade: corrida de decolagem acelera; no chão sem decolar, freia.
     if !s.armed && on_ground || on_ground && !takeoff_roll {
         s.airspeed = (s.airspeed - 3.0 * dt).max(0.0);
     } else if on_ground {
         s.airspeed = (s.airspeed + 3.0 * dt).min(cruise);
     } else if s.armed {
-        s.airspeed += (target_speed - s.airspeed) * (1.0 - (-dt * 0.6f64).exp());
+        // Aeronaves grandes aceleram no limite do motor; o avião pequeno responde suave, como antes.
+        s.airspeed += ((target_speed - s.airspeed) * (1.0 - (-dt * 0.6f64).exp())).clamp(-pf.accel * 1.5 * dt, pf.accel * dt);
     }
 
     // Inclinação e curva coordenada.
     let mut bank = match (bank_cmd, target_hdg) {
         (Some(b), _) => b,
-        (None, Some(h)) => (wrap(h - s.hdg) * 1.1).clamp(-MAX_BANK_DEG, MAX_BANK_DEG),
+        (None, Some(h)) => (wrap(h - s.hdg) * 1.1).clamp(-pf.bank, pf.bank),
         _ => 0.0,
     };
     if on_ground {
@@ -1417,8 +1556,12 @@ fn fixed_wing_step(
     s.hdg = (s.hdg + s.yaw_rate * dt).rem_euclid(360.0);
 
     // Vertical: sobe/desce para o alvo; sem sustentação ou desarmado, afunda.
-    let mut vz = climb_cmd.unwrap_or(((target_alt - s.alt) * 0.35).clamp(-4.0, 4.0));
-    if !on_ground && (s.airspeed < STALL_MS || !s.armed) && s.alt > 2.0 {
+    let mut vz = climb_cmd.unwrap_or(((target_alt - s.alt) * 0.35).clamp(-pf.descent, pf.climb));
+    if s.no_thrust && !on_ground {
+        // Sem motor: planeia (razão de planeio ~12).
+        vz = vz.min(-s.airspeed / 12.0);
+    }
+    if !on_ground && (s.airspeed < stall || !s.armed) && s.alt > 2.0 {
         vz = vz.min(-3.0);
     }
     if on_ground {
@@ -1434,13 +1577,18 @@ fn fixed_wing_step(
     let w = if on_ground { (0.0, 0.0) } else { *wind };
     s.ve = s.airspeed * sh + w.0;
     s.vn = s.airspeed * ch + w.1;
-    s.e += s.ve * dt;
+    s.e += s.ve * dt / k;
     s.n += s.vn * dt;
     s.alt = (s.alt + s.vz * dt).max(0.0);
     if s.alt == 0.0 {
         s.vz = s.vz.max(0.0);
     }
     s.pitch = (s.vz / v.max(5.0)).atan().to_degrees();
+    // Demanda do motor em relação ao cruzeiro: arrasto com o quadrado da velocidade, mais a subida.
+    s.demand = if !s.armed || s.no_thrust { 0.0 } else {
+        let accel = if target_speed > s.airspeed + 5.0 { 1.25 } else { 1.0 };
+        ((s.airspeed / cruise).powi(2) * 0.85 + 0.15) * (1.0 + 0.6 * s.vz.max(0.0) / pf.climb) * accel
+    };
 }
 
 /// Ruído pseudo-gaussiano determinístico e barato.
@@ -1516,28 +1664,32 @@ struct Engine {
     runtime_s: f64,
     thr: f64,
     load: f64,
+    /// Aeronave grande: consumo em cruzeiro (cm³/min); o empuxo segue a demanda do voo.
+    flow_cruise: Option<f64>,
 }
 
 impl Engine {
-    fn new(kind: Propulsion, class: VehicleClass) -> Self {
+    fn new(kind: Propulsion, class: VehicleClass, perf: Perf) -> Self {
         let (escs, pusher) = match (kind, class) {
             (Propulsion::Combustion | Propulsion::Jet, _) => (0, None),
             (_, VehicleClass::Copter) => (4, None),
             (_, VehicleClass::Vtol) => (5, Some(4)),
             _ => (1, None),
         };
-        let tank_cm3 = if kind == Propulsion::Jet { 5000.0 } else { 4000.0 };
+        let big = perf.tank_l > 0.0;
+        let tank_cm3 = if big { perf.tank_l * 1000.0 } else if kind == Propulsion::Jet { 5000.0 } else { 4000.0 };
         Engine {
             kind, escs, pusher,
             cells: if kind.burns_fuel() { 3 } else { 6 },
             esc_rpm: vec![0.0; escs], esc_temp: vec![26.0; escs], esc_mah: vec![0.0; escs],
             batt_temp: 24.0, energy_wh: 0.0,
             rpm: 0.0, cht: [25.0; 2], egt: [25.0; 2], flow: 0.0,
-            // Começa com o tanque a 90 %.
-            tank_cm3, fuel_used: tank_cm3 * 0.1, starved: false,
+            // O avião pequeno começa com o tanque a 90 %; os de longo alcance, cheios.
+            tank_cm3, fuel_used: if big { 0.0 } else { tank_cm3 * 0.1 }, starved: false,
             turb: TURB_READY, turb_t: 0.0,
             gen_a: 0.0, gen_rpm: 0.0, gen_temp: 25.0, rect_temp: 25.0, gen_on_s: 0.0, runtime_s: 1_262_000.0 / 3.6,
             thr: 0.0, load: 0.0,
+            flow_cruise: big.then(|| perf.flow_lph * 1000.0 / 60.0),
         }
     }
 
@@ -1553,9 +1705,9 @@ impl Engine {
     }
 
     /// Avança o modelo; devolve a corrente do gerador e um aviso, se houver.
-    fn step(&mut self, dt: f64, armed: bool, load: f64, hovering: bool, current: f64, pack_v: f64) -> (f64, Option<String>) {
+    fn step(&mut self, dt: f64, armed: bool, load: f64, hovering: bool, current: f64, pack_v: f64, demand: f64) -> (f64, Option<String>) {
         let full = if hovering { 34.0 } else { 24.0 };
-        self.thr = if armed { (load / full).clamp(0.0, 1.0) } else { 0.0 };
+        self.thr = if !armed { 0.0 } else if self.flow_cruise.is_some() { (demand / 1.3).clamp(0.0, 1.0) } else { (load / full).clamp(0.0, 1.0) };
         self.load = load;
         let thr = self.thr;
         let mut note = None;
@@ -1583,7 +1735,11 @@ impl Engine {
                     lag(&mut self.cht[i], hot, if running { 50.0 } else { 140.0 }, dt);
                     lag(&mut self.egt[i], if running { 470.0 + 270.0 * thr - i as f64 * 14.0 } else { 25.0 }, 6.0, dt);
                 }
-                self.flow = if running { 9.0 + 70.0 * thr.powf(1.2) } else { 0.0 };
+                self.flow = match (running, self.flow_cruise) {
+                    (false, _) => 0.0,
+                    (true, Some(f)) => f * demand.max(0.15),
+                    (true, None) => 9.0 + 70.0 * thr.powf(1.2),
+                };
             }
             Propulsion::Jet => {
                 self.turb_t += dt;
@@ -1610,11 +1766,15 @@ impl Engine {
                 lag(&mut self.rpm, rpm, 1.0, dt);
                 lag(&mut self.egt[0], egt, tau, dt);
                 self.egt[1] = self.egt[0];
-                self.flow = match self.turb {
+                self.flow = match (self.turb, self.flow_cruise) {
+                    (TURB_RUNNING, Some(f)) => f * demand.max(0.15),
+                    (_, Some(f)) if self.turb == TURB_ACCEL || self.turb == TURB_IGNITION => f * 0.1,
+                    (t, _) => match t {
                     TURB_RUNNING => 95.0 + 380.0 * thr,
                     TURB_ACCEL => 130.0,
                     TURB_IGNITION => 40.0,
                     _ => 0.0,
+                    },
                 };
             }
             Propulsion::Hybrid => {
@@ -1686,6 +1846,7 @@ impl Engine {
             }));
             out.push(MavMessage::RPM(RPM_DATA { rpm1: rpm.max(0.0) as f32, rpm2: -1.0 }));
             out.push(named("FUEL", 100.0 * (1.0 - self.fuel_used / self.tank_cm3).max(0.0)));
+            out.push(named("FUEL_L", ((self.tank_cm3 - self.fuel_used) / 1000.0).max(0.0)));
             if jet {
                 out.push(named("TURB_ST", self.turb as f64));
                 out.push(named("PUMP_V", if self.turb == TURB_RUNNING { 0.4 + 3.8 * self.thr } else if self.turb == TURB_ACCEL { 1.6 } else { 0.0 }));

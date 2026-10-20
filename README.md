@@ -116,6 +116,9 @@ O que mais a estação faz:
     calcula a rota pela rede de aerovias (no sentido permitido, entrando e saindo por DCT) e a direta, com o
     vento, no regime **mais rápido** e no **mais econômico**, desviando das áreas R e P no nível de cruzeiro.
     Compara distância, tempo e combustível/bateria e mostra se cabe na reserva; **Usar esta rota** gera o plano.
+    Ou ponha os waypoints no mapa e use **Ligar os waypoints pelas aerovias**: cada perna, do home ao último
+    ponto, segue a rede de aerovias, mantendo os seus pontos (altitude e entrega); pernas em que as aerovias
+    dariam uma volta grande demais ficam diretas, e **Desfazer** volta ao plano anterior.
   * **Rota por aerovias:** escreva a rota como no campo 15 do plano de voo (`SBMT DCT PAI UZ6 MNS DCT SBEG`,
     coordenadas `2330S04637W`, grupos `N0090A045`) e a estação expande as aerovias em waypoints com o nome dos
     fixos, avisando trechos de mão única na contramão. Clicar num fixo com **Waypoint** ligado o põe na rota.
@@ -132,6 +135,11 @@ O que mais a estação faz:
     hipersônico Mach 6). Com Mach, a velocidade verdadeira sai da atmosfera padrão na altitude de cada perna;
     o navlog marca o fim da subida (TOC) e o início da descida (TOD), avisa curvas que não cabem nas pernas
     pelo raio de curva e o voo supersônico sobre terra.
+* **Combustível:** com leitura de combustível (EFI ou script com `FUEL`/`FUEL_L`), a tela de voo mostra um
+  mostrador de E a F com as faixas de Configurar → Motor, a reserva do perfil de longo alcance, os litros que
+  restam e a autonomia no consumo atual; a barra de cima mostra o nível e a autonomia, e a aba Painel ganha o
+  instrumento **Combustível**. O velocímetro muda de escala sozinho (até 8000 km/h) e mostra o Mach perto e
+  acima do som.
 * **Mapa 3D:** o botão **3D** da tela de voo inclina o mapa e mostra os obstáculos do LiDAR como blocos;
   gire com o botão direito do mouse ou com dois dedos.
 * **Tablet:** em telas de toque os botões e campos ficam maiores, e entre 760 e 1180 px os painéis e
@@ -196,6 +204,15 @@ O veículo simulado serve para testar a interface. Para validar voo de verdade, 
 pairam (modos do ArduCopter). O avião decola correndo no modo TAKEOFF, precisa de velocidade para
 voar, faz curvas inclinado e circula em LOITER e RTL (modos do ArduPlane). O VTOL decola na vertical,
 voa como avião e paira nos modos Q (QHOVER, QLOITER, QLAND, QRTL).
+
+`--airframe piston|jet|supersonic|hypersonic` troca o avião pequeno por uma aeronave de longo alcance:
+pistão (55 m/s, 150 L), jato (Mach 0,78, 8000 L), supersônico (Mach 2, 100 000 L) ou hipersônico (Mach 6,
+40 000 L), sempre avião e com o motor dela. Cada uma sobe, acelera e faz curvas como deve (250 kt abaixo de
+10 000 ft, Mach 1 só lá em cima, raio de curva de dezenas de quilômetros), gasta combustível pelo regime e
+planeia se o tanque secar; a posição acompanha a curvatura da latitude em voos de centenas de quilômetros.
+`--time-scale 10` acelera o tempo do simulador (até 20×) para um voo de horas caber em minutos; a telemetria
+e o tempo de voo da estação continuam no relógio de verdade. No app, as duas opções aparecem na tela
+**Conectar** quando o veículo é avião, e o perfil de longo alcance da estação muda junto.
 
 `--wind 270/6` põe vento constante (de onde sopra / m/s) com rajadas por cima; o simulador manda a
 estimativa em WIND, como o ArduPilot.
@@ -289,7 +306,8 @@ De ponta a ponta (Node 22, depois de `cargo build --bins` em `bridge/`):
 node tests/simulador.mjs          # ponte + fake-vehicle: token, missão e download, entrega em voo do
                                   # avião, pouso, VTOL, gravação e reprodução, calibrações, geocerca,
                                   # manutenção, rádio, piloto automático, motor (elétrico, combustão,
-                                  # turbina, híbrido), longo alcance (cartas, MSL, direto para, desvio)
+                                  # turbina, híbrido), longo alcance (cartas, MSL, direto para, desvio,
+                                  # supersônico com tempo acelerado)
 tests/baixar-sitl.sh              # baixa o SITL oficial (ArduCopter e ArduPlane estáveis) em tests/.sitl
 node tests/sitl.mjs               # ponte + SITL: missão com entrega, download, RTL e pouso (Copter);
                                   # TAKEOFF, missão e pouso com DO_LAND_START (Plane)
@@ -330,7 +348,9 @@ podman run --rm -v "$PWD":/repo:Z -w /repo/ros2_ws ros:jazzy-ros-base bash -c \
 * O navlog usa um modelo simples de subida e descida e a elevação do home para limites "do solo"; não há
   modelo de terreno ao longo da rota. O plano automático não escolhe níveis por sentido (regra semicircular)
   nem procedimentos de saída e chegada (SID/STAR).
-* O simulador voa num plano local em torno do home: serve para testar a interface, não rotas de centenas de
-  quilômetros nem velocidades supersônicas, que o ArduPilot também não foi feito para voar.
+* O simulador é cinemático: as aeronaves grandes voam rotas longas e rápidas de forma plausível, mas sem
+  aerodinâmica de verdade, peso que muda com o combustível ou pouso de jato. O ArduPilot real também não foi
+  feito para velocidades supersônicas: campos como a velocidade do `GLOBAL_POSITION_INT` saturam acima de
+  ~327 m/s (a estação usa o `VFR_HUD`).
 * O mapa de satélite padrão usa os tiles públicos da Esri, que exigem internet e atribuição.
   Para campo sem internet, sirva tiles locais e ajuste a URL em **Configurar → Estação**.

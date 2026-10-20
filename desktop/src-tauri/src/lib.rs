@@ -64,6 +64,12 @@ pub enum LinkConfig {
         /// electric, combustion, jet ou hybrid (padrão: electric).
         #[serde(default)]
         propulsion: Option<String>,
+        /// Avião: small, piston, jet, supersonic ou hypersonic (padrão: small).
+        #[serde(default)]
+        airframe: Option<String>,
+        /// Aceleração do tempo da simulação (1 a 20).
+        #[serde(default)]
+        time_scale: Option<f64>,
     },
     /// Rádio de telemetria ou cabo USB.
     Serial { port: String, baud: u32 },
@@ -115,6 +121,14 @@ fn sim_propulsion(p: &str) -> Result<&'static str, String> {
         .into_iter()
         .find(|k| *k == p)
         .ok_or_else(|| format!("motor do simulador inválido: {p:?}"))
+}
+
+/// Aeronaves que o simulador conhece.
+fn sim_airframe(a: &str) -> Result<&'static str, String> {
+    ["small", "piston", "jet", "supersonic", "hypersonic"]
+        .into_iter()
+        .find(|k| *k == a)
+        .ok_or_else(|| format!("aeronave do simulador inválida: {a:?}"))
 }
 
 /// Aceita "host:porta" ou só "porta" (escuta em todas as interfaces).
@@ -370,7 +384,7 @@ fn start_link(app: tauri::AppHandle, sup: State<'_, Supervisor>, config: LinkCon
     capture(&sup.log, "", bridge.stderr.take().unwrap());
     let mut stdin = vec![bridge.stdin.take().unwrap()];
 
-    let sim = if let LinkConfig::Simulator { lat, lon, vehicle, propulsion } = &config {
+    let sim = if let LinkConfig::Simulator { lat, lon, vehicle, propulsion, airframe, time_scale } = &config {
         let mut args = vec![
             "--mavlink".into(),
             format!("udpout:127.0.0.1:{}", port("ARACUA_SIM_PORT", DEFAULT_SIM_PORT)),
@@ -384,6 +398,15 @@ fn start_link(app: tauri::AppHandle, sup: State<'_, Supervisor>, config: LinkCon
         }
         if let Some(p) = propulsion {
             args.extend(["--propulsion".into(), sim_propulsion(p)?.into()]);
+        }
+        if let Some(a) = airframe {
+            args.extend(["--airframe".into(), sim_airframe(a)?.into()]);
+        }
+        if let Some(t) = time_scale {
+            if !(1.0..=20.0).contains(t) {
+                return Err(format!("aceleração do simulador inválida: {t}"));
+            }
+            args.extend(["--time-scale".into(), t.to_string()]);
         }
         if let (Some(lat), Some(lon)) = (lat, lon) {
             args.extend(["--lat".into(), lat.to_string(), "--lon".into(), lon.to_string()]);
@@ -446,7 +469,7 @@ mod tests {
 
     #[test]
     fn urls_da_ponte() {
-        let sim = LinkConfig::Simulator { lat: None, lon: None, vehicle: None, propulsion: None };
+        let sim = LinkConfig::Simulator { lat: None, lon: None, vehicle: None, propulsion: None, airframe: None, time_scale: None };
         assert_eq!(sim.mavlink_url().unwrap(), "udpin:127.0.0.1:14550");
         let s = LinkConfig::Serial { port: "/dev/ttyUSB0".into(), baud: 57600 };
         assert_eq!(s.mavlink_url().unwrap(), "serial:/dev/ttyUSB0:57600");
@@ -472,9 +495,11 @@ mod tests {
         let c: LinkConfig = serde_json::from_str(r#"{"kind":"serial","port":"/dev/ttyACM0","baud":921600}"#).unwrap();
         assert_eq!(c, LinkConfig::Serial { port: "/dev/ttyACM0".into(), baud: 921600 });
         let c: LinkConfig = serde_json::from_str(r#"{"kind":"simulator"}"#).unwrap();
-        assert_eq!(c, LinkConfig::Simulator { lat: None, lon: None, vehicle: None, propulsion: None });
+        assert_eq!(c, LinkConfig::Simulator { lat: None, lon: None, vehicle: None, propulsion: None, airframe: None, time_scale: None });
         let c: LinkConfig = serde_json::from_str(r#"{"kind":"simulator","vehicle":"plane","propulsion":"jet"}"#).unwrap();
-        assert_eq!(c, LinkConfig::Simulator { lat: None, lon: None, vehicle: Some("plane".into()), propulsion: Some("jet".into()) });
+        assert_eq!(c, LinkConfig::Simulator { lat: None, lon: None, vehicle: Some("plane".into()), propulsion: Some("jet".into()), airframe: None, time_scale: None });
+        let c: LinkConfig = serde_json::from_str(r#"{"kind":"simulator","vehicle":"plane","airframe":"supersonic","time_scale":10}"#).unwrap();
+        assert!(matches!(c, LinkConfig::Simulator { airframe: Some(ref a), time_scale: Some(t), .. } if a == "supersonic" && t == 10.0));
     }
 
     #[test]
@@ -484,6 +509,8 @@ mod tests {
         assert!(sim_vehicle("plane --mavlink x").is_err());
         assert_eq!(sim_propulsion("hybrid"), Ok("hybrid"));
         assert!(sim_propulsion("nuclear").is_err());
+        assert_eq!(sim_airframe("hypersonic"), Ok("hypersonic"));
+        assert!(sim_airframe("ônibus espacial").is_err());
     }
 
     #[test]

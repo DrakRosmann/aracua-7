@@ -4,6 +4,7 @@ import { clock } from '../lib/format'
 import { CLASS_LABEL, MODES_BY_CLASS, modeLabel, vehicleClass } from '../types'
 import { BatteryIcon, Icon } from './Icons'
 import { DeliveryChip } from './Delivery'
+import { FuelStat } from './Fuel'
 import { describeLink, isDesktop } from '../lib/desktop'
 import { t as tr } from '../lib/i18n'
 
@@ -81,6 +82,7 @@ export function TopBar() {
           <Icon.radio />
           <span className="bars">{[4, 6, 9, 11, 14].map((hh, i) => <i key={i} className={i < bars ? 'on' : ''} style={{ height: hh }} />)}</span>
         </div>
+        <FuelStat />
         <div className="stat" title={tr('Bateria')} style={{ paddingRight: 14 }}>
           <BatteryIcon pct={t?.battery.remaining ?? 0} />
           <span style={{ fontSize: 14 }}>{t && t.battery.remaining >= 0 ? `${t.battery.remaining}%` : '—'}</span>

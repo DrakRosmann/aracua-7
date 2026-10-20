@@ -44,6 +44,8 @@ export const Icon = {
   chart: () => <S><path d="M3 6l6-2.5 6 2.5 6-2.5v14.5l-6 2.5-6-2.5-6 2.5z" /><path d="M6 15l5-6 7 3" /><path d="M11 7.5l1.6 2.8h-3.2z" /></S>,
   /** Navegação: rumo para o próximo fixo. */
   route: () => <S><circle cx="12" cy="12" r="8.5" /><path d="M12 5.5l2.6 7.2L12 11.3l-2.6 1.4z" /><path d="M12 15v3.5" /></S>,
+  /** Bomba de combustível. */
+  fuel: () => <S><path d="M5 20V5.5A1.5 1.5 0 0 1 6.5 4h6A1.5 1.5 0 0 1 14 5.5V20M3.5 20h12M5 10h9" /><path d="M14 8.5h1.5a1.5 1.5 0 0 1 1.5 1.5v5.5a1.5 1.5 0 0 0 3 0V8l-2.5-2.5" /></S>,
   antenna: () => <S><path d="M5 12a7 7 0 0 1 14 0M8.5 12a3.5 3.5 0 0 1 7 0" /><path d="M12 12v9" /></S>,
 }
 

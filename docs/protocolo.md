@@ -122,6 +122,7 @@ Sensores sem mensagem própria entram por `NAMED_VALUE_FLOAT` (script Lua), com 
 | `H2O` ou `COOLANT` | temperatura da água (°C) |
 | `OILT`, `OILP` | temperatura (°C) e pressão (bar) do óleo |
 | `FUEL` | nível do tanque (%); sem ele, a interface usa o consumo da EFI e a capacidade do tanque configurada |
+| `FUEL_L` | combustível que resta (L); com ele o mostrador de combustível mostra litros e autonomia sem precisar da capacidade do tanque |
 | `PUMP_V` | tensão da bomba de combustível da turbina (V) |
 | `TURB_ST` | estado da turbina: 0 desligada, 1 pronta, 2 ignição, 3 acelerando, 4 funcionando, 5 resfriando, 6 falha |
 

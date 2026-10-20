@@ -40,7 +40,11 @@ function PlanRail() {
         <button className={`rb ${station.addMode ? 'on' : ''}`} onClick={() => { station.addMode = !station.addMode; station.emit('ui') }}><Icon.pinAdd />{tr('Waypoint')}</button>
         <button className={`rb ${station.surveyPreview ? 'on' : ''}`} onClick={() => document.getElementById('survey')?.toggleAttribute('open')}><Icon.grid />{tr('Varredura')}</button>
         <button className={`rb ${station.drawing ? 'on' : ''}`} onClick={() => document.getElementById('fence')?.toggleAttribute('open')}><Icon.fence />{tr('Geocerca')}</button>
-        <button className="rb" title={tr('Rota por aerovias, como no plano de voo')} onClick={() => document.getElementById('route')?.toggleAttribute('open')}><Icon.route />{tr('Rota')}</button>
+        <button className="rb" title={tr('Plano automático e rotas pelas aerovias')} onClick={() => {
+          const el = document.getElementById('autoplan')
+          el?.toggleAttribute('open')
+          el?.scrollIntoView({ block: 'nearest' })
+        }}><Icon.route />{tr('Rota')}</button>
         <ChartsButton top={250} />
         <button className="rb" onClick={() => station.telem?.lat && station.mapApi?.flyTo(station.telem)}><Icon.target />{tr('Veículo')}</button>
         <button className="rb" onClick={() => {

@@ -2,6 +2,7 @@
 // espaços de instrumentos que o operador troca (como num painel de avião) e luzes de
 // alerta embaixo. Tela cheia com F ou pelo botão.
 
+import { FuelGauge } from './Fuel'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { station, useChannels } from '../lib/store'
 import { annunciators, DEFAULT_COCKPIT, INSTRUMENT_LABEL, LAYOUTS, setSlot, slotsOf, type InstrumentId, type LayoutId } from '../lib/cockpit'
@@ -65,6 +66,7 @@ function Instrument({ id }: { id: InstrumentId }) {
     case 'camera': return <Camera hud={false} />
     case 'hud': return <Camera hud />
     case 'ems': return <div className="ck-ems"><EngineFace /></div>
+    case 'fuel': return <FuelGauge />
     case 'asi': return <AirspeedGauge />
     case 'adi': return <AttitudeGauge />
     case 'alt': return <AltimeterGauge />

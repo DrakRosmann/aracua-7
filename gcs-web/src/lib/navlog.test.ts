@@ -3,7 +3,7 @@ import { ChartIndex, chartsExpired, fmtLimit, limitM, type ChartPack } from './c
 import { distance } from './geo'
 import { coordinate, parseRoute, speedLevel } from './route'
 import { computeNavlog, DEFAULT_LONG_RANGE, fmtEte, fmtNavDist, fmtTas, KT, liveNav, modePerf, NM, PRESETS, radioHorizon, soundSpeed, splitLegs, turnRadius, windTriangle, type Perf } from './navlog'
-import { planRoute, restrictedOn, routeText } from './planner'
+import { planRoute, restrictedOn, routeText, routeThrough } from './planner'
 
 // Carta de brinquedo: aerovia W1 de ALFA a DELTA (DELTA–CHARL só no sentido W1 de ida),
 // VOR BRV, aeródromos SBAA e SBDD, uma área restrita no meio do caminho e uma AMA.
@@ -299,5 +299,32 @@ describe('plano automático', () => {
     expect(planRoute(charts, { ...req, objective: 'fast', avoid: true, join: 30_000 })).toBeNull()
     expect(planRoute(null, { ...req, objective: 'fast' })).toBeNull()
     expect(routeText('HOME', [])).toBe('HOME')
+  })
+})
+
+describe('aerovias entre os waypoints do plano', () => {
+  const perf: Perf = { ...DEFAULT_LONG_RANGE.perf, cruise: 25, burn: 100, capacity: 2000 }
+  const base = { objective: 'fast' as const, perf, wind: { dir: 0, speed: 0 }, ground: 700, airways: 'auto' as const, avoid: false, join: 80_000, toMsl: (a: number) => a + 700, maxDetour: 1.5 }
+
+  it('liga home → A → B pelas aerovias e mantém os pontos do operador', () => {
+    const pts = [
+      { lat: -21.35, lon: -46.05, alt: 800, drop: [2] },
+      { lat: -21.3, lon: -45.4, alt: 900 },
+    ]
+    const r = routeThrough(charts, home, pts, (i) => String.fromCharCode(65 + i), base)
+    // Home (perto de SBAA) → A pela W1 (ALFA, BRV, CHARL) e A → B direto: não há aerovia para lá.
+    expect(r.items.map((p) => p.name)).toEqual(['ALFA', 'BRV', 'CHARL', 'A', 'B'])
+    expect(r.items.map((p) => (p as { via: string }).via)).toEqual(['DCT', 'W1', 'W1', 'DCT', 'DCT'])
+    expect(r.items.slice(0, 3).every((p) => p.alt === 800)).toBe(true)
+    expect((r.items[3] as { drop?: number[] }).drop).toEqual([2])
+    expect(r.added).toBe(3)
+    expect(r.legs.map((l) => `${l.how}:${l.why ?? ''}`)).toEqual(['airways:', 'dct:no-path'])
+    expect(r.legs[0].text).toBe('HOME DCT ALFA W1 CHARL DCT A')
+  })
+
+  it('volta grande demais fica direta', () => {
+    const r = routeThrough(charts, home, [{ lat: -21.35, lon: -46.05, alt: 800 }], () => 'X', { ...base, maxDetour: 1.0001 })
+    expect(r.legs[0]).toMatchObject({ how: 'dct', why: 'detour' })
+    expect(r.items.map((p) => p.name)).toEqual(['X'])
   })
 })

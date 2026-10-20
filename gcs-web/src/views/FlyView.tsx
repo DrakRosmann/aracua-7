@@ -14,6 +14,7 @@ import { CountdownOverlay, DeliveryPanel, ReleaseFlash } from '../components/Del
 import { EnginePanel } from '../components/Engine'
 import { ForcePrompt, ReplayBar } from '../components/Replay'
 import { ChartsButton, NavPanel } from '../components/LongRange'
+import { FuelDial } from '../components/Fuel'
 import { vehicleClass } from '../types'
 import { t as tr } from '../lib/i18n'
 
@@ -214,6 +215,7 @@ export function FlyView() {
       <ObstacleRadar />
       <Compass />
       <Speedometer />
+      <FuelDial />
       <AttitudeTape />
       <FlightTime />
       <DeliveryPanel />

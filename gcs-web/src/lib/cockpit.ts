@@ -6,7 +6,7 @@ import { buildPanel, issues, type EngineSettings } from './engine'
 import type { Telemetry } from '../types'
 
 export type InstrumentId =
-  | 'pfd' | 'nd' | 'camera' | 'hud' | 'ems' | 'asi' | 'adi' | 'alt' | 'vsi' | 'turn' | 'dg' | 'radar' | 'data' | 'none'
+  | 'pfd' | 'nd' | 'camera' | 'hud' | 'ems' | 'fuel' | 'asi' | 'adi' | 'alt' | 'vsi' | 'turn' | 'dg' | 'radar' | 'data' | 'none'
 
 export const INSTRUMENT_LABEL: Record<InstrumentId, string> = {
   pfd: tk('PFD: horizonte, fitas e rumo'),
@@ -14,6 +14,7 @@ export const INSTRUMENT_LABEL: Record<InstrumentId, string> = {
   camera: tk('Câmera'),
   hud: tk('Câmera com HUD'),
   ems: tk('Motor (EMS)'),
+  fuel: tk('Combustível'),
   asi: tk('Velocímetro'),
   adi: tk('Horizonte artificial'),
   alt: tk('Altímetro'),

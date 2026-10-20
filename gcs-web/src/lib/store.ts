@@ -15,7 +15,7 @@ import { wpName } from './format'
 import { getLang, setLang, t as tr, tk, type Lang } from './i18n'
 import { AlertTracker, buildPanel, DEFAULT_ENGINE, fuelPercent, issues, type EngineSettings } from './engine'
 import { ChartIndex, DEFAULT_LAYERS, type ChartLayers, type ChartsInfo } from './charts'
-import { computeNavlog, DEFAULT_LONG_RANGE, liveNav, type Live, type LongRangeSettings, type Navlog, type Wind } from './navlog'
+import { computeNavlog, DEFAULT_LONG_RANGE, liveNav, PRESETS, reserveEnergy, type Live, type LongRangeSettings, type Navlog, type Wind } from './navlog'
 import { DEFAULT_COCKPIT, type CockpitSettings } from './cockpit'
 import { DEFAULT_PAD, effectiveThrottle, PadButtons, pickPad, readManual, type Manual, type PadAction, type PadSettings, type PadSnapshot } from './gamepad'
 
@@ -334,6 +334,8 @@ class Station {
       if (c.kind !== 'replay') saveLink(c)
       this.linkDialog = false
       this.addLog('ok', tr('Conexão: {v0}', { v0: describeLink(c) }))
+      // Simulador com aeronave grande: o perfil de longo alcance acompanha (mesmos nomes).
+      if (c.kind === 'simulator' && c.airframe && c.airframe !== 'small') this.applyPreset(c.airframe)
       this.connect()
     } catch (e) {
       this.linkError = String(e)
@@ -579,6 +581,16 @@ class Station {
     if (this.plan.length) this.setPlan(this.plan.map((w) => ({ ...w, alt: conv(w.alt) })))
   }
 
+  /** Aplica um perfil pronto de aeronave (Configurar → Longo alcance, ou ao abrir o simulador). */
+  applyPreset(key: string) {
+    const pr = PRESETS[key]
+    if (!pr) return
+    this.setAltReference(pr.altMsl)
+    const cur = this.settings.longRange
+    this.saveSettings({ longRange: { ...cur, perf: { ...cur.perf, ...pr.perf }, maxAlt: pr.maxAlt, cruiseAlt: pr.altMsl ? pr.cruiseAlt : Math.min(pr.cruiseAlt, pr.maxAlt), splitKm: pr.splitKm } })
+    this.addLog('ok', tr('Perfil: {name}', { name: tr(pr.label) }))
+  }
+
   /** Vento usado nas contas: o medido pelo piloto automático (arredondado) ou o digitado. */
   wind(): Wind {
     const lr = this.settings.longRange
@@ -593,8 +605,28 @@ class Station {
     const p = this.settings.longRange.perf
     if (!t?.connected) return null
     if (p.energy === 'battery') return t.battery.remaining >= 0 ? (t.battery.remaining / 100) * p.capacity : null
-    const pct = t.propulsion ? fuelPercent(t.propulsion, this.settings.engine) : null
-    return pct === null ? null : (pct / 100) * p.capacity
+    const f = this.fuel()
+    return f ? f.liters ?? (f.pct / 100) * p.capacity : null
+  }
+
+  /**
+   * Combustível a bordo: % do tanque (FUEL do script ou consumo da EFI com o tanque de Configurar →
+   * Motor), litros (FUEL_L, ou o % sobre o tanque conhecido), consumo e autonomia; null sem leitura.
+   */
+  fuel(): { pct: number; liters: number | null; flowLph: number | null; endurance: number | null; reservePct: number | null } | null {
+    const t = this.telem
+    if (!t?.connected || !t.propulsion) return null
+    const pct = fuelPercent(t.propulsion, this.settings.engine)
+    if (pct === null) return null
+    const lr = this.settings.longRange.perf
+    const named = t.propulsion.named.FUEL_L
+    const tank = this.settings.engine.tankL > 0 ? this.settings.engine.tankL : lr.energy === 'fuel' ? lr.capacity : 0
+    const liters = named !== undefined ? named : tank > 0 ? (pct / 100) * tank : null
+    const cm3min = t.propulsion.efi?.fuel_flow
+    const flowLph = cm3min != null && cm3min > 0 ? cm3min * 0.06 : null
+    const endurance = liters !== null && flowLph ? (liters / flowLph) * 3600 : null
+    const reservePct = lr.energy === 'fuel' && lr.capacity > 0 ? Math.min(100, (reserveEnergy(lr) / lr.capacity) * 100) : null
+    return { pct, liters, flowLph, endurance, reservePct }
   }
 
   /** Navlog do plano em edição (ou da missão no veículo), refeito só quando algo muda. */

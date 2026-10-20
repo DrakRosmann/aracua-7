@@ -4,8 +4,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { station, useChannels } from '../lib/store'
-import { desktop, savedLink, SIM_PROPULSION, SIM_VEHICLES, type FlightLog, type LinkConfig, type PortInfo, type SimPropulsion, type SimVehicle } from '../lib/desktop'
-import { getLang, t as tr } from '../lib/i18n'
+import { desktop, savedLink, SIM_PROPULSION, SIM_VEHICLES, type FlightLog, type LinkConfig, type PortInfo, type SimPropulsion, type SimVehicle, SIM_AIRFRAMES, type SimAirframe } from '../lib/desktop'
+import { getLang, t as tr, tk } from '../lib/i18n'
 
 type Kind = LinkConfig['kind']
 
@@ -27,6 +27,15 @@ const SIM_HINT: Record<SimVehicle, string> = {
   vtol: tr('VTOL (ArduPlane QuadPlane): decola na vertical, voa como avião e pousa na vertical nos modos Q (QLAND, QRTL).'),
 }
 
+/** O que cada aeronave grande do simulador faz. */
+const AIRFRAME_HINT: Record<SimAirframe, string> = {
+  small: '',
+  piston: tk('Pistão de longo alcance: cruzeiro de 55 m/s (107 kt), tanque de 150 L a 28 L/h.'),
+  jet: tk('Jato: Mach 0,78 no cruzeiro, 250 kt abaixo de 10 000 ft, 8000 L a 2600 L/h.'),
+  supersonic: tk('Supersônico: Mach 2 acima de 9 km (subsônico abaixo), sobe a 40 m/s, raio de curva de ~60 km, 100 000 L a 22 000 L/h.'),
+  hypersonic: tk('Hipersônico: Mach 6 a 30 km, sobe a 120 m/s, curvas de centenas de quilômetros, 40 000 L a 45 000 L/h.'),
+}
+
 const BAUDS = [57600, 115200, 230400, 460800, 921600, 1500000]
 
 export function ConnectDialog() {
@@ -42,6 +51,8 @@ export function ConnectDialog() {
   const [address, setAddress] = useState(last?.kind === 'tcp' ? last.address : '127.0.0.1:5760')
   const [vehicle, setVehicle] = useState<SimVehicle>(last?.kind === 'simulator' ? last.vehicle ?? 'copter' : 'copter')
   const [propulsion, setPropulsion] = useState<SimPropulsion>(last?.kind === 'simulator' ? last.propulsion ?? 'electric' : 'electric')
+  const [airframe, setAirframe] = useState<SimAirframe>(last?.kind === 'simulator' ? last.airframe ?? 'small' : 'small')
+  const [timeScale, setTimeScale] = useState(last?.kind === 'simulator' ? last.time_scale ?? 1 : 1)
   const [showLog, setShowLog] = useState(false)
   const logBox = useRef<HTMLPreElement>(null)
 
@@ -62,7 +73,15 @@ export function ConnectDialog() {
 
   const config = (): LinkConfig => {
     switch (kind) {
-      case 'simulator': return { kind, vehicle, propulsion }
+      case 'simulator': {
+        // Aeronaves grandes: sempre avião, com o motor delas; acelerar o tempo só vale para avião.
+        const big = vehicle === 'plane' && airframe !== 'small'
+        return {
+          kind, vehicle, propulsion: big ? undefined : propulsion,
+          airframe: vehicle === 'plane' ? airframe : undefined,
+          time_scale: vehicle === 'plane' && timeScale > 1 ? timeScale : undefined,
+        }
+      }
       case 'serial': return { kind, port, baud }
       case 'udp': return { kind, listen }
       case 'tcp': return { kind, address }
@@ -96,12 +115,31 @@ export function ConnectDialog() {
                     className={vehicle === v.id ? 'on' : ''} onClick={() => setVehicle(v.id)}>{tr(v.label)}</button>
                 ))}
               </div>
-              <div className="cx-seg" role="radiogroup" aria-label={tr('Motor do veículo simulado')}>
-                {SIM_PROPULSION.map((p) => (
-                  <button key={p.id} type="button" role="radio" aria-checked={propulsion === p.id}
-                    className={propulsion === p.id ? 'on' : ''} onClick={() => setPropulsion(p.id)}>{tr(p.label)}</button>
-                ))}
-              </div>
+              {vehicle === 'plane' && (
+                <div className="cx-seg" role="radiogroup" aria-label={tr('Aeronave simulada')}>
+                  {SIM_AIRFRAMES.map((a) => (
+                    <button key={a.id} type="button" role="radio" aria-checked={airframe === a.id}
+                      className={airframe === a.id ? 'on' : ''} onClick={() => setAirframe(a.id)}>{tr(a.label)}</button>
+                  ))}
+                </div>
+              )}
+              {!(vehicle === 'plane' && airframe !== 'small') && (
+                <div className="cx-seg" role="radiogroup" aria-label={tr('Motor do veículo simulado')}>
+                  {SIM_PROPULSION.map((p) => (
+                    <button key={p.id} type="button" role="radio" aria-checked={propulsion === p.id}
+                      className={propulsion === p.id ? 'on' : ''} onClick={() => setPropulsion(p.id)}>{tr(p.label)}</button>
+                  ))}
+                </div>
+              )}
+              {vehicle === 'plane' && (
+                <div className="cx-seg" role="radiogroup" aria-label={tr('Aceleração do tempo')}>
+                  {[1, 5, 10, 20].map((x) => (
+                    <button key={x} type="button" role="radio" aria-checked={timeScale === x}
+                      className={timeScale === x ? 'on' : ''} onClick={() => setTimeScale(x)}>{x === 1 ? tr('Tempo real') : `${x}×`}</button>
+                  ))}
+                </div>
+              )}
+              {vehicle === 'plane' && airframe !== 'small' && <p className="hint">{tr(AIRFRAME_HINT[airframe])} {tr('O perfil de longo alcance da estação muda para essa aeronave ao conectar.')}</p>}
               <p className="hint">{SIM_HINT[vehicle]} {tr('O simulador segue missões, solta cargas e gera um bairro sintético para o LiDAR e para a câmera (o vídeo dele aparece quando nenhum outro está configurado). A física é simplificada: para validar voo de verdade, use o SITL do ArduPilot (opção TCP).')}</p>
             </>
           )}

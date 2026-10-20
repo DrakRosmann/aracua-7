@@ -12,7 +12,7 @@ const bin = (n) => process.env[`${n.toUpperCase().replace('-', '_')}_BIN`] ?? jo
 let port = 28700
 
 /** Ponte + simulador em portas próprias (não esbarram num app aberto). */
-async function pilha({ vehicle = 'copter', propulsion = 'electric', bridgeArgs = [], sim = true } = {}) {
+async function pilha({ vehicle = 'copter', propulsion = 'electric', bridgeArgs = [], simArgs = [], sim = true } = {}) {
   const p = { ws: ++port, mav: ++port, map: ++port, cam: ++port }
   const dir = tempDir('teste')
   const ponte = run(bin('aracua-bridge'), [
@@ -20,7 +20,7 @@ async function pilha({ vehicle = 'copter', propulsion = 'electric', bridgeArgs =
     '--payload-file', join(dir, 'entrega.json'), '--maintenance-file', join(dir, 'manutencao.json'), '--log-dir', join(dir, 'logs'), ...bridgeArgs,
   ])
   await sleep(400)
-  const veiculo = sim ? run(bin('fake-vehicle'), ['--vehicle', vehicle, '--propulsion', propulsion, '--camera', `127.0.0.1:${p.cam}`, '--mavlink', `udpout:127.0.0.1:${p.mav}`, '--map', `127.0.0.1:${p.map}`]) : null
+  const veiculo = sim ? run(bin('fake-vehicle'), ['--vehicle', vehicle, '--propulsion', propulsion, '--camera', `127.0.0.1:${p.cam}`, '--mavlink', `udpout:127.0.0.1:${p.mav}`, '--map', `127.0.0.1:${p.map}`, ...simArgs]) : null
   return {
     ...p, dir, ponte, veiculo, url: `ws://127.0.0.1:${p.ws}`,
     async cliente(query = '') {
@@ -453,6 +453,27 @@ const falhas = await suite('Ponte + simulador', [
       await c.until(() => metros(c.t, alvo) < 250, 90_000, 'chegar ao ponto do desvio')
       c.send({ cmd: 'mission_current', seq: 999 })
       await c.next('error', 5_000, (m) => m.message.includes('não existe'))
+      c.close()
+    } finally { s.stop() }
+  }],
+
+  ['supersônico (tempo 10×): sobe, passa de Mach 1 lá em cima, voa 150 km e gasta combustível', async () => {
+    const s = await pilha({ simArgs: ['--airframe', 'supersonic', '--time-scale', '10'] })
+    try {
+      const c = await s.cliente()
+      if (c.t.vehicle_class !== 'plane') throw new Error(`classe ${c.t.vehicle_class}`)
+      await c.until(() => c.t.propulsion?.named.FUEL_L > 99_000, 5_000, 'tanque cheio de 100 000 L')
+      const H = c.t.home
+      const alvo = desloca(H, 150_000, 0)
+      await voarMissao(c, { items: [{ ...alvo, alt: 17_000 }], alt_msl: true, loiter_at_end: true, rtl_at_end: false }, 0)
+      // Abaixo de 3048 m segura 250 kt (128 m/s).
+      await c.until(() => c.t.alt_msl > 1500 && c.t.alt_msl < 2800, 60_000, 'subindo abaixo de 10 000 ft')
+      if (c.t.airspeed > 135) throw new Error(`${c.t.airspeed.toFixed(0)} m/s abaixo de 10 000 ft`)
+      await c.until(() => c.t.alt_msl > 12_000 && c.t.airspeed > 500, 90_000, 'Mach 1,7+ acima de 12 km')
+      await c.until(() => c.t.mission_current >= c.mission.wp_seq[0] + 1, 120_000, 'chegar ao ponto a 150 km')
+      if (metros(H, c.t) < 120_000) throw new Error(`só ${(metros(H, c.t) / 1000).toFixed(0)} km do home`)
+      const f = c.t.propulsion
+      if (!(f.named.FUEL_L < 99_000 && f.efi.fuel_flow > 300_000)) throw new Error(`combustível: ${f.named.FUEL_L} L, ${f.efi.fuel_flow} cm³/min`)
       c.close()
     } finally { s.stop() }
   }],

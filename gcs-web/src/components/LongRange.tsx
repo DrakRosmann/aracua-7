@@ -5,18 +5,18 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { station, useChannels } from '../lib/store'
-import { clamp } from '../lib/format'
+import { clamp, wpName } from '../lib/format'
 import { bearing, distance } from '../lib/geo'
 import { chartsExpired, FT, type ChartLayers, type ChartPack } from '../lib/charts'
 import { coordinate, parseRoute, type RoutePoint } from '../lib/route'
-import { planRoute, type PlannedRoute } from '../lib/planner'
+import { planRoute, routeThrough, type PlannedRoute, type ThroughLeg } from '../lib/planner'
 import {
   fmtAlt, fmtDeg, fmtEnergy, fmtEte, fmtNavDist, fmtSpeed, fmtTas, KT, modePerf, PRESETS, reserveEnergy, soundSpeed, splitLegs, windTriangle,
   type Conflict, type LongRangeSettings, type Navlog, type Perf, type SpeedMode,
 } from '../lib/navlog'
 import { Icon } from './Icons'
 import { t as tr, tk } from '../lib/i18n'
-import { vehicleClass } from '../types'
+import { vehicleClass, type MissionItem } from '../types'
 
 const lrSave = (patch: Partial<LongRangeSettings>) => station.saveSettings({ longRange: { ...station.settings.longRange, ...patch } })
 const perfSave = (patch: Partial<Perf>) => lrSave({ perf: { ...station.settings.longRange.perf, ...patch } })
@@ -165,6 +165,10 @@ export function AutoPlan() {
   const [joinKm, setJoinKm] = useState(80)
   const [res, setRes] = useState<{ key: string; r: PlannedRoute | null }[] | null>(null)
   const [err, setErr] = useState('')
+  const [objective, setObjective] = useState<'fast' | 'eco'>('fast')
+  const [maxDetour, setMaxDetour] = useState(1.6)
+  const [through, setThrough] = useState<ThroughLeg[] | null>(null)
+  const [undo, setUndo] = useState<MissionItem[] | null>(null)
   const home = station.telem?.home ?? null
   const charts = station.charts
   const place = (tok: string) => {
@@ -193,6 +197,21 @@ export function AutoPlan() {
     lrSave({ speedMode: r.mode })
     station.routeText = r.text
     buildPlan(r.points, true)
+  }
+  // Liga os waypoints que o operador pôs no mapa pelas aerovias, perna a perna.
+  const linkPlan = () => {
+    const start = home ?? station.mapApi?.center()
+    if (!charts || !start || !station.plan.length) return
+    const before = station.plan
+    const r = routeThrough(charts, start, before, wpName, {
+      objective, perf: p, wind: station.wind(), ground: home?.alt ?? 0, airways, avoid, join: joinKm * 1000,
+      toMsl: (a) => (lr.altMsl ? a : a + (home?.alt ?? 0)), maxDetour,
+    })
+    station.setPlan(r.items.map((q) => ({ ...q }) as MissionItem), -1)
+    lrSave({ speedMode: objective })
+    setUndo(before)
+    setThrough(r.legs)
+    station.addLog('cmd', tr('Waypoints ligados pelas aerovias: {n} fixos acrescentados', { n: r.added }))
   }
   const fastest = res?.filter((x) => x.r).reduce<PlannedRoute | null>((b, x) => (!b || x.r!.time < b.time ? x.r : b), null)
   const cheapest = res?.filter((x) => x.r).reduce<PlannedRoute | null>((b, x) => (!b || x.r!.energy < b.energy ? x.r : b), null)
@@ -235,6 +254,25 @@ export function AutoPlan() {
           </div>
         ))}
         {res && <div className="hint">{tr('O regime da rota escolhida passa a valer no navlog. Confira a rota com as cartas oficiais e o plano de voo junto ao órgão ATC.')}</div>}
+        <div className="sub">{tr('Pelos waypoints do plano')}</div>
+        <div className="hint">{tr('Ponha os waypoints no mapa (com Waypoint ligado) e ligue cada perna, do home ao último, pelas aerovias. Os seus pontos ficam, com altitude e entrega; os fixos entre eles herdam a altitude do ponto seguinte.')}</div>
+        <div className="grid2">
+          <label>{tr('Objetivo')}<select value={objective} onChange={(e) => setObjective(e.target.value as 'fast' | 'eco')}>
+            <option value="fast">{tr('Mais rápido')}</option><option value="eco">{tr('Mais econômico')}</option>
+          </select></label>
+          <label>{tr('Volta máxima (× o direto)')}<input type="number" min={1} max={5} step={0.1} value={maxDetour} onChange={(e) => setMaxDetour(clamp(+e.target.value || 1.6, 1, 5))} /></label>
+        </div>
+        <div className="brow">
+          <button className="btn on" disabled={!charts || !station.plan.length} onClick={linkPlan}>{tr('Ligar os waypoints pelas aerovias')}</button>
+          <button className="btn" disabled={!undo} onClick={() => { if (undo) station.setPlan(undo, -1); setUndo(null); setThrough(null) }}>{tr('Desfazer')}</button>
+        </div>
+        {!station.plan.length && <div className="hint">{tr('O plano está vazio: clique no mapa para pôr os waypoints.')}</div>}
+        {through?.map((l, i) => (
+          <div key={i} className={`hint ${l.how === 'dct' && l.why ? 'warn' : ''}`}>
+            <b>{l.from} → {l.to}</b> · {l.how === 'airways' ? <code>{l.text}</code> : l.why === 'detour' ? tr('direto: pelas aerovias seria {x}× a distância', { x: (l.detour ?? 0).toFixed(1) }) : l.why === 'no-path' ? tr('direto: sem aerovia que sirva para esta perna') : tr('direto: pontos muito próximos')}
+            {' · '}{fmtNavDist(l.dist, u)}
+          </div>
+        ))}
       </div>
     </details>
   )
@@ -545,14 +583,7 @@ export function LongRangeSetup() {
   const cruiseParam = station.params.get('AIRSPEED_CRUISE')
   const homeAlt = station.telem?.home?.alt ?? 0
   const cruiseMsl = lr.altMsl ? lr.cruiseAlt : lr.cruiseAlt + homeAlt
-  const applyPreset = (k: string) => {
-    const pr = PRESETS[k]
-    if (!pr) return
-    station.setAltReference(pr.altMsl)
-    const cur = station.settings.longRange
-    station.saveSettings({ longRange: { ...cur, perf: { ...cur.perf, ...pr.perf }, maxAlt: pr.maxAlt, cruiseAlt: pr.altMsl ? pr.cruiseAlt : Math.min(pr.cruiseAlt, pr.maxAlt), splitKm: pr.splitKm } })
-    station.addLog('ok', tr('Perfil: {name}', { name: tr(pr.label) }))
-  }
+  const applyPreset = (k: string) => station.applyPreset(k)
   return (
     <>
       <h2>{tr('Longo alcance')}</h2>

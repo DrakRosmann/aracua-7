@@ -2,6 +2,7 @@
 
 import { t, tk } from './lib/i18n'
 import type { FenceData } from './lib/fence'
+import type { ChartPack, ChartsInfo } from './lib/charts'
 
 export interface Telemetry {
   type: 'telemetry'
@@ -55,6 +56,8 @@ export interface Telemetry {
   propulsion?: Propulsion
   /** Piloto automático da ponte (`autopilot` é o nome do firmware); ausente em pontes antigas. */
   ap?: AutopilotState
+  /** Vento estimado pelo piloto automático (de onde sopra, graus verdadeiros; m/s). */
+  wind?: { dir: number; speed: number; speed_z: number } | null
 }
 
 /** Piloto automático estilo avião (ver bridge/src/autopilot.rs). */
@@ -168,6 +171,9 @@ export type ServerMessage =
   | ({ type: 'vehicle_fence' } & FenceData)
   | { type: 'fence_upload'; ok: boolean; result: string; count: number }
   | MaintenanceState
+  | ChartsInfo
+  | { type: 'charts_status'; step: string; done: number; total: number }
+  | ({ type: 'charts' } & ChartPack)
 
 export interface MaintBattery { id: number; name: string; cycles: number; flight_s: number; max_cycles: number; retired: boolean }
 export interface MaintTask {
@@ -200,6 +206,10 @@ export interface VehicleMission {
   land_at_end: boolean
   ignored: number
   count: number
+  /** Termina circulando sobre o último waypoint (voo só de ida). */
+  loiter_at_end?: boolean
+  /** Altitudes acima do nível do mar. */
+  alt_msl?: boolean
 }
 
 export interface ReplayState {
@@ -280,13 +290,23 @@ export interface MissionItem {
   alt: number
   /** Compartimentos de entrega soltos neste ponto. */
   drop?: number[]
+  /** Nome do fixo ou aeródromo (rota por aerovias); só na estação, o veículo não guarda. */
+  name?: string
+  /** Aerovia (ou DCT) pela qual se chega ao ponto; só na estação. */
+  via?: string
 }
 
 export type ClientCommand =
   | { cmd: 'arm'; arm: boolean; force?: boolean }
   | { cmd: 'mode'; mode: string }
   | { cmd: 'takeoff'; alt: number; force?: boolean }
-  | { cmd: 'mission_upload'; items: MissionItem[]; rtl_at_end?: boolean; land_at_end?: boolean; approach_deg?: number | null; cruise_ms?: number }
+  | { cmd: 'mission_upload'; items: MissionItem[]; rtl_at_end?: boolean; land_at_end?: boolean; approach_deg?: number | null; cruise_ms?: number; alt_msl?: boolean; loiter_at_end?: boolean }
+  | { cmd: 'mission_current'; seq: number }
+  | { cmd: 'goto'; lat: number; lon: number; alt?: number }
+  | { cmd: 'charts_fetch'; url?: string }
+  | { cmd: 'charts_get' }
+  | { cmd: 'charts_import'; pack: ChartPack }
+  | { cmd: 'charts_clear' }
   | { cmd: 'mission_download' }
   | { cmd: 'mission_start'; force?: boolean }
   | { cmd: 'replay'; speed?: number; paused?: boolean; seek?: number }

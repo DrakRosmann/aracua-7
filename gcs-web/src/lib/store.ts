@@ -11,15 +11,18 @@ import { paramIdsFor } from './params'
 import { emptyFence, type FenceData } from './fence'
 import type { MaintenanceState } from '../types'
 import { setupTiles, type Bounds } from './tiles'
+import { wpName } from './format'
 import { getLang, setLang, t as tr, tk, type Lang } from './i18n'
-import { AlertTracker, buildPanel, DEFAULT_ENGINE, issues, type EngineSettings } from './engine'
+import { AlertTracker, buildPanel, DEFAULT_ENGINE, fuelPercent, issues, type EngineSettings } from './engine'
+import { ChartIndex, DEFAULT_LAYERS, type ChartLayers, type ChartsInfo } from './charts'
+import { computeNavlog, DEFAULT_LONG_RANGE, liveNav, type Live, type LongRangeSettings, type Navlog, type Wind } from './navlog'
 import { DEFAULT_COCKPIT, type CockpitSettings } from './cockpit'
 import { DEFAULT_PAD, effectiveThrottle, PadButtons, pickPad, readManual, type Manual, type PadAction, type PadSettings, type PadSnapshot } from './gamepad'
 
 // Origens de lançamento que a ponte manda (em português, traduzidas na tela).
 tk('missão'); tk('externo'); tk('estação')
 
-export type Channel = 'telemetry' | 'log' | 'params' | 'mission' | 'map' | 'ui' | 'conn' | 'payload' | 'link' | 'replay' | 'calib' | 'fence' | 'maint' | 'pad'
+export type Channel = 'telemetry' | 'log' | 'params' | 'mission' | 'map' | 'ui' | 'conn' | 'payload' | 'link' | 'replay' | 'calib' | 'fence' | 'maint' | 'pad' | 'charts'
 export type View = 'fly' | 'plan' | 'setup' | 'analyze' | 'panel'
 
 export interface Settings {
@@ -43,6 +46,12 @@ export interface Settings {
   gamepad: PadSettings
   /** Aba Painel: layout, instrumentos de cada espaço, glareshield e alertas. */
   cockpit: CockpitSettings
+  /** Longo alcance: perfil da aeronave, vento, unidades, altitudes e rota. */
+  longRange: LongRangeSettings
+  /** Camadas das cartas aeronáuticas no mapa. */
+  chartLayers: ChartLayers
+  /** Mostrar as cartas no mapa. */
+  chartsOn: boolean
 }
 
 const DEFAULT_SETTINGS: Settings = {
@@ -60,6 +69,9 @@ const DEFAULT_SETTINGS: Settings = {
   engine: DEFAULT_ENGINE,
   gamepad: DEFAULT_PAD,
   cockpit: DEFAULT_COCKPIT,
+  longRange: DEFAULT_LONG_RANGE,
+  chartLayers: DEFAULT_LAYERS,
+  chartsOn: true,
 }
 
 function loadSettings(): Settings {
@@ -72,6 +84,12 @@ function loadSettings(): Settings {
     s.gamepad = { ...DEFAULT_PAD, ...s.gamepad, modes: { ...DEFAULT_PAD.modes, ...s.gamepad?.modes } }
     s.cockpit = { ...DEFAULT_COCKPIT, ...s.cockpit, slots: { ...DEFAULT_COCKPIT.slots, ...s.cockpit?.slots } }
     if (!(s.cockpit.layout in DEFAULT_COCKPIT.slots)) s.cockpit.layout = DEFAULT_COCKPIT.layout
+    const dp = DEFAULT_LONG_RANGE.perf, sp = s.longRange?.perf
+    s.longRange = {
+      ...DEFAULT_LONG_RANGE, ...s.longRange, wind: { ...DEFAULT_LONG_RANGE.wind, ...s.longRange?.wind },
+      perf: { ...dp, ...sp, eco: { ...dp.eco, ...sp?.eco }, fast: { ...dp.fast, ...sp?.fast } },
+    }
+    s.chartLayers = { ...DEFAULT_LAYERS, ...s.chartLayers }
     // No app desktop a ponte é local e iniciada pelo próprio app.
     if (isDesktop) s.bridgeUrl = 'ws://127.0.0.1:8765'
     applyLook(s)
@@ -118,6 +136,21 @@ class Station {
   apOffAt = 0
   /** Inclinação do gimbal pedida (graus), comum ao controle e ao painel. */
   gimbalPitch = -30
+  /** Painel de navegação (longo alcance) visível na tela de voo. */
+  navOpen = false
+  /** Rota digitada em Planejar (campo 15), mantida ao trocar de aba. */
+  routeText = ''
+
+  // Cartas aeronáuticas (vêm da ponte) e o andamento do download.
+  charts: ChartIndex | null = null
+  chartsInfo: ChartsInfo | null = null
+  chartsStatus: { step: string; done: number; total: number } | null = null
+  /** Consumo medido agora (W ou L/h), suavizado. */
+  burnAvg: number | null = null
+  /** Energia já não basta para voltar com a reserva (avisado uma vez). */
+  bingo = false
+  private lastLiveAt = 0
+  private navMemo: { key: string; v: Navlog | null } = { key: '', v: null }
 
   // Controle de videogame
   pad: PadSnapshot | null = null
@@ -391,7 +424,11 @@ class Station {
       case 'vehicle_mission': {
         const first = !this.vehicleMission
         this.vehicleMission = m
-        this.onVehicle = m.items.map((w) => ({ ...w }))
+        // O veículo não guarda nomes: os da rota voltam pelo plano, ponto a ponto.
+        this.onVehicle = m.items.map((w) => {
+          const p = this.plan.find((q) => q.name && Math.abs(q.lat - w.lat) < 1e-6 && Math.abs(q.lon - w.lon) < 1e-6)
+          return { ...w, name: w.name ?? p?.name, via: p?.via }
+        })
         this.onVehicleSeq = m.wp_seq
         if (first || this.upload.state !== 'sending') {
           this.addLog('info', m.items.length
@@ -429,6 +466,29 @@ class Station {
         this.maint = m
         this.emit('maint')
         break
+      case 'charts_info': {
+        const was = this.chartsInfo
+        this.chartsInfo = m
+        if (m.busy) this.chartsStatus ??= { step: '', done: 0, total: 1 }
+        else this.chartsStatus = null
+        if (!m.loaded) this.charts = null
+        // Cartas novas na ponte: pede só se forem diferentes das que já temos.
+        else if (!m.busy && m.id !== this.charts?.id) this.send({ cmd: 'charts_get' }, true)
+        if (was?.busy && !m.busy && m.loaded && !m.error) this.addLog('ok', tr('Cartas atualizadas: {source}, emenda de {date}', { source: m.source ?? '', date: m.effective ?? '?' }))
+        if (m.error && m.error !== was?.error) this.addLog('error', tr('Cartas: {msg}', { msg: m.error }))
+        this.emit('charts')
+        break
+      }
+      case 'charts_status':
+        this.chartsStatus = { step: m.step, done: m.done, total: m.total }
+        this.emit('charts')
+        break
+      case 'charts': {
+        const { type: _t, ...pack } = m
+        this.charts = new ChartIndex(pack)
+        this.emit('charts', 'mission')
+        break
+      }
       case 'statustext':
         this.addLog(SEVERITY[m.severity] ?? 'info', m.text)
         break
@@ -499,6 +559,101 @@ class Station {
     this.emit('calib')
   }
 
+  // ---------- longo alcance ----------
+
+  /** Teto das altitudes no plano: `maxAlt` é altura sobre o home; em MSL soma a elevação dele. */
+  maxAlt() {
+    const lr = this.settings.longRange
+    return lr.altMsl ? lr.maxAlt + (this.telem?.home?.alt ?? 0) : lr.maxAlt
+  }
+
+  /** Troca a referência das altitudes (home ↔ MSL) convertendo o plano, o cruzeiro e os novos WPs. */
+  setAltReference(msl: boolean) {
+    const lr = this.settings.longRange
+    if (msl === lr.altMsl) return
+    const h = this.telem?.home?.alt
+    if (h === undefined) return this.saveSettings({ longRange: { ...lr, altMsl: msl } })
+    const d = msl ? h : -h
+    const conv = (a: number) => Math.max(5, Math.round(a + d))
+    this.saveSettings({ longRange: { ...lr, altMsl: msl, cruiseAlt: conv(lr.cruiseAlt) }, wpAlt: conv(this.settings.wpAlt) })
+    if (this.plan.length) this.setPlan(this.plan.map((w) => ({ ...w, alt: conv(w.alt) })))
+  }
+
+  /** Vento usado nas contas: o medido pelo piloto automático (arredondado) ou o digitado. */
+  wind(): Wind {
+    const lr = this.settings.longRange
+    const w = this.telem?.wind
+    if (lr.windSource === 'measured' && w && this.telem?.connected) return { dir: Math.round(w.dir / 5) * 5 % 360, speed: Math.round(w.speed * 2) / 2 }
+    return lr.wind
+  }
+
+  /** Energia que resta a bordo (Wh ou L), pela telemetria; null se não der para saber. */
+  energyLeft(): number | null {
+    const t = this.telem
+    const p = this.settings.longRange.perf
+    if (!t?.connected) return null
+    if (p.energy === 'battery') return t.battery.remaining >= 0 ? (t.battery.remaining / 100) * p.capacity : null
+    const pct = t.propulsion ? fuelPercent(t.propulsion, this.settings.engine) : null
+    return pct === null ? null : (pct / 100) * p.capacity
+  }
+
+  /** Navlog do plano em edição (ou da missão no veículo), refeito só quando algo muda. */
+  navlog(items: MissionItem[] = this.view === 'plan' || !this.onVehicle.length ? this.plan : this.onVehicle): Navlog | null {
+    const t = this.telem
+    const home = t?.home
+    if (!home || !items.length) return null
+    const lr = this.settings.longRange
+    const w = this.wind()
+    const key = [items === this.plan ? 'p' : 'v', this.version('mission'), JSON.stringify(lr), this.charts?.id, home.lat, home.lon, home.alt, w.dir, w.speed, this.settings.landAtEnd].join('|')
+    if (this.navMemo.key !== key) {
+      this.navMemo = {
+        key,
+        v: computeNavlog({
+          home, points: items.map((p, i) => ({ ...p, name: p.name ?? wpName(i) })), altMsl: lr.altMsl, perf: lr.perf, wind: w,
+          charts: this.charts, returnHome: !lr.oneWay, radio: lr.radioKm * 1000, mode: lr.speedMode,
+        }),
+      }
+    }
+    return this.navMemo.v
+  }
+
+  /** Navegação em voo: próximo ponto, destino, volta ao home e margem de energia. */
+  live(): Live | null {
+    const t = this.telem
+    if (!t?.connected || !t.lat) return null
+    const route = this.onVehicle.map((w, i) => ({ ...w, name: w.name ?? wpName(i) }))
+    return liveNav({
+      pos: t, altMsl: t.alt_msl, mode: this.settings.longRange.speedMode, perf: this.settings.longRange.perf, wind: this.wind(), home: t.home, left: this.energyLeft(),
+      burnNow: this.burnAvg, route, active: this.activeWaypoint(),
+    })
+  }
+
+  /** Consumo medido e o aviso de "bingo" (energia só para voltar), uma vez por segundo. */
+  private checkEnergy(t: Telemetry) {
+    const p = this.settings.longRange.perf
+    const now = performance.now()
+    let burn: number | null = null
+    if (p.energy === 'battery' && t.battery.current > 0.5) burn = t.battery.voltage * t.battery.current
+    const flow = t.propulsion?.efi?.fuel_flow
+    if (p.energy === 'fuel' && flow != null && flow > 0) burn = flow * 0.06 // cm³/min → L/h
+    if (burn !== null && t.armed) this.burnAvg = this.burnAvg === null ? burn : this.burnAvg + (burn - this.burnAvg) * 0.02
+    if (!t.armed) this.burnAvg = null
+    if (now - this.lastLiveAt < 1000) return
+    this.lastLiveAt = now
+    const airborne = t.armed && (t.alt_rel > 2 || t.groundspeed > 5)
+    const m = airborne ? this.live()?.margin ?? null : null
+    if (m === null) {
+      this.bingo = false
+      return
+    }
+    if (m < 0 && !this.bingo) {
+      this.bingo = true
+      this.addLog('error', tr('BINGO: a energia que resta só dá para voltar ao home agora (com a reserva). Retorne.'))
+    } else if (m > 0.03 * p.capacity && this.bingo) {
+      this.bingo = false
+    }
+  }
+
   /** Motor/bateria fora da faixa com o veículo armado: avisa no log (vermelho também no aviso da tela). */
   private checkEngine(t: Telemetry) {
     if (!t.connected || !t.armed || !t.propulsion) return this.engineAlerts.reset()
@@ -525,6 +680,7 @@ class Station {
     if (prev && prev.armed !== t.armed) this.addLog(t.armed ? 'warn' : 'ok', t.armed ? tr('Veículo armado') : tr('Veículo desarmado'))
     if (prev && prev.mode !== t.mode && t.connected) this.addLog('info', `Modo: ${t.mode}`)
     this.checkEngine(t)
+    this.checkEnergy(t)
     // Piloto automático desligou sem o operador pedir: alarme sonoro, como no avião.
     if (prev?.ap?.engaged && t.ap && !t.ap.engaged && t.ap.message) {
       this.apOffAt = Date.now()
@@ -808,9 +964,11 @@ class Station {
     const cls = vehicleClass(this.telem)
     const wing = cls === 'plane' || cls === 'vtol'
     const cruise = this.params.get('AIRSPEED_CRUISE') ?? (this.params.has('TRIM_ARSPD_CM') ? this.params.get('TRIM_ARSPD_CM')! / 100 : undefined)
+    const lr = this.settings.longRange
     if (this.send({
-      cmd: 'mission_upload', items: this.plan, rtl_at_end: true,
-      land_at_end: wing && this.settings.landAtEnd, approach_deg: this.settings.approachDeg, cruise_ms: cruise,
+      cmd: 'mission_upload', items: this.plan, rtl_at_end: !lr.oneWay,
+      land_at_end: wing && this.settings.landAtEnd && !lr.oneWay, approach_deg: this.settings.approachDeg, cruise_ms: cruise,
+      alt_msl: lr.altMsl, loiter_at_end: lr.oneWay,
     })) {
       this.onVehicle = this.plan.map((p) => ({ ...p }))
       this.upload = { state: 'sending', text: tr('Enviando missão…') }
@@ -896,6 +1054,12 @@ function describe(c: ClientCommand): string {
     case 'mission_upload': return tr('Enviar missão com {length} waypoints', { length: c.items.length })
     case 'mission_start': return c.force ? tr('Iniciar missão (sem pré-voo)') : tr('Iniciar missão')
     case 'mission_download': return tr('Ler missão do veículo')
+    case 'mission_current': return tr('Direto para o item {seq} da missão', { seq: c.seq })
+    case 'goto': return tr('Desviar para {lat}, {lon}', { lat: c.lat.toFixed(4), lon: c.lon.toFixed(4) })
+    case 'charts_fetch': return tr('Baixar cartas aeronáuticas')
+    case 'charts_get': return tr('Ler cartas da ponte')
+    case 'charts_import': return tr('Importar cartas ({n} trechos de aerovia)', { n: c.pack.airways.length })
+    case 'charts_clear': return tr('Apagar cartas')
     case 'replay': return c.seek !== undefined ? tr('Reprodução: pular') : c.paused !== undefined ? (c.paused ? tr('Reprodução: pausar') : tr('Reprodução: continuar')) : tr('Reprodução a {speed}×', { speed: c.speed ?? 1 })
     case 'calibrate': return tr('Calibrar: {what}', { what: tr({ accel: tk('acelerômetro (6 posições)'), level: tk('nivelar'), gyro: tk('giroscópio'), compass: tk('bússola'), compass_accept: tk('aceitar bússola'), compass_cancel: tk('cancelar bússola') }[c.kind]) })
     case 'accel_pos': return tr('Calibração: posição {position} pronta', { position: c.position })

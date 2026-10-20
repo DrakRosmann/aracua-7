@@ -40,6 +40,10 @@ export const Icon = {
   lidar: () => <S><circle cx="12" cy="12" r="8.5" /><circle cx="12" cy="12" r="4" /><path d="M12 12l6-6" /></S>,
   pulse: () => <S><path d="M3 12h4l2-6 4 12 2-6h6" /></S>,
   drop: () => <S><path d="M5 4h14v7H5z" /><path d="M9 4v3h6V4" /><path d="M12 14v7M8.5 17.5 12 21l3.5-3.5" /></S>,
+  /** Carta aeronáutica: aerovia entre dois fixos. */
+  chart: () => <S><path d="M3 6l6-2.5 6 2.5 6-2.5v14.5l-6 2.5-6-2.5-6 2.5z" /><path d="M6 15l5-6 7 3" /><path d="M11 7.5l1.6 2.8h-3.2z" /></S>,
+  /** Navegação: rumo para o próximo fixo. */
+  route: () => <S><circle cx="12" cy="12" r="8.5" /><path d="M12 5.5l2.6 7.2L12 11.3l-2.6 1.4z" /><path d="M12 15v3.5" /></S>,
   antenna: () => <S><path d="M5 12a7 7 0 0 1 14 0M8.5 12a3.5 3.5 0 0 1 7 0" /><path d="M12 12v9" /></S>,
 }
 

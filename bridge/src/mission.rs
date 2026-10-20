@@ -37,11 +37,15 @@ pub struct BuildOptions {
     pub approach_deg: Option<f32>,
     /// Velocidade de cruzeiro do avião, para calcular onde soltar a carga em voo.
     pub cruise_ms: f32,
+    /// Altitudes dos waypoints acima do nível do mar (voos longos, terreno que muda); senão, relativas ao home.
+    pub alt_msl: bool,
+    /// Termina circulando sobre o último waypoint (destino de um voo só de ida), sem voltar.
+    pub loiter_at_end: bool,
 }
 
 impl Default for BuildOptions {
     fn default() -> Self {
-        Self { class: VehicleClass::Copter, rtl_at_end: true, land_at_end: false, approach_deg: None, cruise_ms: 18.0 }
+        Self { class: VehicleClass::Copter, rtl_at_end: true, land_at_end: false, approach_deg: None, cruise_ms: 18.0, alt_msl: false, loiter_at_end: false }
     }
 }
 
@@ -120,6 +124,10 @@ fn do_item(seq: u16, a: &Action, target: (u8, u8)) -> MISSION_ITEM_INT_DATA {
 /// chegada, a `release_lead_m` dele; a carga sai ao cruzar esse ponto e cai no alvo.
 pub fn build(t: (u8, u8), home: (f64, f64, f32), wps: &[Waypoint], drops: &[DropPlan], o: BuildOptions) -> Built {
     let rel = MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT_INT;
+    // Frame dos waypoints do usuário; decolagem e pouso continuam relativos ao home.
+    let wpf = if o.alt_msl { MavFrame::MAV_FRAME_GLOBAL_INT } else { rel };
+    // Altura sobre o home (decolagem, queda da carga).
+    let height = |alt: f32| if o.alt_msl { alt - home.2 } else { alt };
     let fixed_wing = o.class.fixed_wing();
     let mut items = vec![item(0, MavCmd::MAV_CMD_NAV_WAYPOINT, MavFrame::MAV_FRAME_GLOBAL_INT, home.0, home.1, home.2, t)];
     let mut wp_seq = vec![];
@@ -128,7 +136,9 @@ pub fn build(t: (u8, u8), home: (f64, f64, f32), wps: &[Waypoint], drops: &[Drop
         items.push(it);
     };
 
-    let first_alt = wps.first().map(|w| w.alt).unwrap_or(20.0);
+    let first_alt = wps.first().map(|w| height(w.alt)).unwrap_or(20.0);
+    // Com altitudes MSL o primeiro ponto pode estar bem acima: decola até uma altura segura e sobe na rota.
+    let first_alt = if o.alt_msl { first_alt.clamp(15.0, 150.0) } else { first_alt };
     let mut takeoff = if o.class == VehicleClass::Vtol {
         item(0, MavCmd::MAV_CMD_NAV_VTOL_TAKEOFF, rel, 0.0, 0.0, first_alt, t)
     } else {
@@ -144,10 +154,10 @@ pub fn build(t: (u8, u8), home: (f64, f64, f32), wps: &[Waypoint], drops: &[Drop
         let here = (w.lat, w.lon);
         match drops.get(i).filter(|d| !d.release.is_empty()) {
             Some(d) if fixed_wing => {
-                let lead = release_lead_m(o.cruise_ms as f64, w.alt as f64);
+                let lead = release_lead_m(o.cruise_ms as f64, height(w.alt) as f64);
                 if lead >= 3.0 {
                     let p = offset(here, bearing(prev, here) + 180.0, lead);
-                    let mut rp = item(0, MavCmd::MAV_CMD_NAV_WAYPOINT, rel, p.0, p.1, w.alt, t);
+                    let mut rp = item(0, MavCmd::MAV_CMD_NAV_WAYPOINT, wpf, p.0, p.1, w.alt, t);
                     rp.param2 = RELEASE_POINT_RADIUS_M;
                     push(&mut items, rp);
                 }
@@ -155,19 +165,19 @@ pub fn build(t: (u8, u8), home: (f64, f64, f32), wps: &[Waypoint], drops: &[Drop
                     push(&mut items, do_item(0, a, t));
                 }
                 wp_seq.push(items.len() as u16);
-                push(&mut items, item(0, MavCmd::MAV_CMD_NAV_WAYPOINT, rel, w.lat, w.lon, w.alt, t));
+                push(&mut items, item(0, MavCmd::MAV_CMD_NAV_WAYPOINT, wpf, w.lat, w.lon, w.alt, t));
                 for a in &d.relock {
                     push(&mut items, do_item(0, a, t));
                 }
             }
             Some(d) => {
                 wp_seq.push(items.len() as u16);
-                push(&mut items, item(0, MavCmd::MAV_CMD_NAV_WAYPOINT, rel, w.lat, w.lon, w.alt, t));
+                push(&mut items, item(0, MavCmd::MAV_CMD_NAV_WAYPOINT, wpf, w.lat, w.lon, w.alt, t));
                 for a in &d.release {
                     push(&mut items, do_item(0, a, t));
                 }
                 // Paira sobre o ponto enquanto a carga cai.
-                let mut lt = item(0, MavCmd::MAV_CMD_NAV_LOITER_TIME, rel, w.lat, w.lon, w.alt, t);
+                let mut lt = item(0, MavCmd::MAV_CMD_NAV_LOITER_TIME, wpf, w.lat, w.lon, w.alt, t);
                 lt.param1 = d.hold_s.max(1.0);
                 lt.param4 = 0.0;
                 push(&mut items, lt);
@@ -177,14 +187,18 @@ pub fn build(t: (u8, u8), home: (f64, f64, f32), wps: &[Waypoint], drops: &[Drop
             }
             None => {
                 wp_seq.push(items.len() as u16);
-                push(&mut items, item(0, MavCmd::MAV_CMD_NAV_WAYPOINT, rel, w.lat, w.lon, w.alt, t));
+                push(&mut items, item(0, MavCmd::MAV_CMD_NAV_WAYPOINT, wpf, w.lat, w.lon, w.alt, t));
             }
         }
         prev = here;
     }
 
     let home2 = (home.0, home.1);
-    if o.land_at_end && o.class == VehicleClass::Vtol {
+    let last = wps.last();
+    if let (true, false, Some(w)) = (o.loiter_at_end, o.land_at_end, last) {
+        // Voo só de ida: circula (ou paira) sobre o destino até o operador decidir.
+        push(&mut items, item(0, MavCmd::MAV_CMD_NAV_LOITER_UNLIM, wpf, w.lat, w.lon, w.alt, t));
+    } else if o.land_at_end && o.class == VehicleClass::Vtol {
         push(&mut items, item(0, MavCmd::MAV_CMD_NAV_VTOL_LAND, rel, home.0, home.1, 0.0, t));
     } else if o.land_at_end && o.class == VehicleClass::Plane {
         // Sequência de pouso: o RTL do ArduPlane (RTL_AUTOLAND) também pula para o DO_LAND_START.
@@ -219,6 +233,10 @@ pub struct VehicleMission {
     pub ignored: u16,
     /// Total de itens no veículo, incluindo o home.
     pub count: u16,
+    /// Termina circulando sobre o último waypoint.
+    pub loiter_at_end: bool,
+    /// Waypoints com altitude acima do nível do mar (frame GLOBAL).
+    pub alt_msl: bool,
 }
 
 /// Compartimento e "solta?" de uma ação de servo/relé, se ela for de algum compartimento.
@@ -255,8 +273,15 @@ pub fn parse(items: &[MISSION_ITEM_INT_DATA], slots: &[Slot]) -> VehicleMission 
                 // Ponto de lançamento: as entregas que vêm depois pertencem ao próximo waypoint.
                 m.items.push(Waypoint { lat: f64::NAN, lon: f64::NAN, alt: it.z, drop: vec![] });
             }
+            // Circular sem fim sobre o último waypoint: é o fim da missão, não outro ponto.
+            MAV_CMD_NAV_LOITER_UNLIM if m.items.last().is_some_and(|w| (w.lat - pos(it).0).abs() < 1e-6 && (w.lon - pos(it).1).abs() < 1e-6) => {
+                m.loiter_at_end = true;
+            }
             MAV_CMD_NAV_WAYPOINT | MAV_CMD_NAV_LOITER_UNLIM | MAV_CMD_NAV_LOITER_TURNS | MAV_CMD_NAV_LOITER_TO_ALT
             | MAV_CMD_NAV_SPLINE_WAYPOINT => {
+                if matches!(it.frame, MavFrame::MAV_FRAME_GLOBAL | MavFrame::MAV_FRAME_GLOBAL_INT) {
+                    m.alt_msl = true;
+                }
                 // Fecha um ponto de lançamento pendente (marcado com lat NaN).
                 if m.items.last().is_some_and(|w| w.lat.is_nan()) {
                     carried = m.items.pop().unwrap().drop;
@@ -576,6 +601,29 @@ mod tests {
             assert_eq!(m.rtl_at_end, !class.fixed_wing());
             assert_eq!(m.ignored, 0);
         }
+    }
+
+    #[test]
+    fn longo_alcance_msl_e_circula_no_destino() {
+        let (wps, _) = sample();
+        let wps: Vec<_> = wps.into_iter().map(|w| Waypoint { alt: 900.0, drop: vec![], ..w }).collect();
+        let o = BuildOptions { class: VehicleClass::Plane, alt_msl: true, loiter_at_end: true, ..Default::default() };
+        let b = build((1, 1), (-30.0, -51.2, 800.0), &wps, &[], o);
+        use MavCmd::*;
+        let cmds: Vec<_> = b.items.iter().map(|i| i.command).collect();
+        assert_eq!(cmds, vec![MAV_CMD_NAV_WAYPOINT, MAV_CMD_NAV_TAKEOFF, MAV_CMD_NAV_WAYPOINT, MAV_CMD_NAV_WAYPOINT, MAV_CMD_NAV_LOITER_UNLIM]);
+        // Decola até 100 m sobre o home (900 − 800), relativo; os waypoints vão em MSL.
+        assert_eq!(b.items[1].frame, MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT_INT);
+        assert_eq!(b.items[1].z, 100.0);
+        assert!(b.items[2..].iter().all(|i| i.frame == MavFrame::MAV_FRAME_GLOBAL_INT && i.z == 900.0));
+        assert_eq!(b.items[4].x, b.items[3].x);
+        let m = parse(&b.items, &[]);
+        assert_eq!(m.items.len(), 2);
+        assert!(m.loiter_at_end && m.alt_msl && !m.rtl_at_end && !m.land_at_end);
+        // Pouso pedido manda mais que circular.
+        let o = BuildOptions { land_at_end: true, ..o };
+        let b = build((1, 1), (-30.0, -51.2, 800.0), &wps, &[], o);
+        assert_eq!(b.items.last().unwrap().command, MAV_CMD_NAV_LAND);
     }
 
     #[test]

@@ -104,6 +104,34 @@ O que mais a estação faz:
   (ponteiros para o waypoint e para casa), câmera (com HUD opcional), motor (EMS), radar LiDAR, dados de voo e
   os seis analógicos clássicos (velocímetro, horizonte, altímetro, indicador de curva, giro direcional e
   variômetro). Layouts de uma a seis telas, salvos neste computador; **F** ou o botão alterna a tela cheia.
+* **Longo alcance (cartas, rotas e navegação):**
+  * **Cartas aeronáuticas no mapa:** o botão **Cartas** mostra, como nas cartas ENRC, as aerovias inferiores e
+    superiores (com designador e limites), fixos, VOR/DME/NDB, aeródromos, CTR/TMA/ATZ/CTA, áreas restritas,
+    proibidas e perigosas, FIR e a grade de altitude mínima (AMA), sobre o satélite ou num fundo liso de carta.
+    Tocar num elemento mostra o que ele é. A ponte baixa os dados do GeoServer público do DECEA (as mesmas
+    cartas do AISWEB) em **Configurar → Longo alcance** e guarda em `cartas.json` (`--charts-file`) para usar
+    sem internet; avisa quando a emenda AIRAC vence. Fora do Brasil, importe um arquivo no formato
+    [`aracua-charts`](docs/protocolo.md#cartas-aeronáuticas).
+  * **Plano automático:** em Planejar, escolha partida e destino (ICAO, fixo, coordenada ou HOME) e a estação
+    calcula a rota pela rede de aerovias (no sentido permitido, entrando e saindo por DCT) e a direta, com o
+    vento, no regime **mais rápido** e no **mais econômico**, desviando das áreas R e P no nível de cruzeiro.
+    Compara distância, tempo e combustível/bateria e mostra se cabe na reserva; **Usar esta rota** gera o plano.
+  * **Rota por aerovias:** escreva a rota como no campo 15 do plano de voo (`SBMT DCT PAI UZ6 MNS DCT SBEG`,
+    coordenadas `2330S04637W`, grupos `N0090A045`) e a estação expande as aerovias em waypoints com o nome dos
+    fixos, avisando trechos de mão única na contramão. Clicar num fixo com **Waypoint** ligado o põe na rota.
+  * **Navlog:** rumo verdadeiro e magnético, proa e velocidade no solo com o vento (medido pelo ArduPilot ou
+    informado), tempo, energia e o que sobra em cada perna; ponto de não retorno (PNR) e de igual tempo (ETP)
+    no mapa; espaços aéreos cruzados, altitude mínima de área, pernas fora do alcance ou do horizonte do rádio.
+    Pernas longas seguem o grande círculo e podem ser divididas em pontos intermediários.
+  * **Altitudes MSL e voo só de ida:** as altitudes podem ser acima do nível do mar (frame `GLOBAL`) e a
+    missão pode terminar circulando (ou pairando) sobre o destino em vez de voltar.
+  * **Em voo**, o botão **Nav** mostra próximo fixo, desvio lateral, destino com hora de chegada e energia na
+    chegada, a sobra se voltar agora (com alarme de **BINGO**), o alcance no mapa, **Direto para** um ponto da
+    missão e os **aeródromos mais próximos** com **Desviar** (vai em GUIDED e circula sobre ele).
+  * **Do drone ao hipersônico:** perfis prontos (drone elétrico, avião a pistão, jato, supersônico Mach 2,
+    hipersônico Mach 6). Com Mach, a velocidade verdadeira sai da atmosfera padrão na altitude de cada perna;
+    o navlog marca o fim da subida (TOC) e o início da descida (TOD), avisa curvas que não cabem nas pernas
+    pelo raio de curva e o voo supersônico sobre terra.
 * **Mapa 3D:** o botão **3D** da tela de voo inclina o mapa e mostra os obstáculos do LiDAR como blocos;
   gire com o botão direito do mouse ou com dois dedos.
 * **Tablet:** em telas de toque os botões e campos ficam maiores, e entre 760 e 1180 px os painéis e
@@ -168,6 +196,9 @@ O veículo simulado serve para testar a interface. Para validar voo de verdade, 
 pairam (modos do ArduCopter). O avião decola correndo no modo TAKEOFF, precisa de velocidade para
 voar, faz curvas inclinado e circula em LOITER e RTL (modos do ArduPlane). O VTOL decola na vertical,
 voa como avião e paira nos modos Q (QHOVER, QLOITER, QLAND, QRTL).
+
+`--wind 270/6` põe vento constante (de onde sopra / m/s) com rajadas por cima; o simulador manda a
+estimativa em WIND, como o ArduPilot.
 
 `--propulsion electric|combustion|jet|hybrid` escolhe o motor: elétrico (ESCs e bateria 6S com células),
 combustão (EFI com RPM, CHT/EGT de dois cilindros e tanque), turbina (N1, EGT e sequência de partida ao
@@ -258,7 +289,7 @@ De ponta a ponta (Node 22, depois de `cargo build --bins` em `bridge/`):
 node tests/simulador.mjs          # ponte + fake-vehicle: token, missão e download, entrega em voo do
                                   # avião, pouso, VTOL, gravação e reprodução, calibrações, geocerca,
                                   # manutenção, rádio, piloto automático, motor (elétrico, combustão,
-                                  # turbina, híbrido)
+                                  # turbina, híbrido), longo alcance (cartas, MSL, direto para, desvio)
 tests/baixar-sitl.sh              # baixa o SITL oficial (ArduCopter e ArduPlane estáveis) em tests/.sitl
 node tests/sitl.mjs               # ponte + SITL: missão com entrega, download, RTL e pouso (Copter);
                                   # TAKEOFF, missão e pouso com DO_LAND_START (Plane)
@@ -293,5 +324,13 @@ podman run --rm -v "$PWD":/repo:Z -w /repo/ros2_ws ros:jazzy-ros-base bash -c \
   reprodução o mapa LiDAR fica vazio.
 * A camada LiDAR do mapa desenha até 60 mil obstáculos e 40 mil pontos de solo; para
   mapas maiores, troque a camada GeoJSON por deck.gl.
+* As cartas ajudam a planejar, mas não substituem as publicações oficiais, os NOTAM nem a autorização do
+  DECEA/ANAC; voo além de 120 m ou fora da linha de visada exige autorização. O teto do plano (Configurar →
+  Longo alcance) começa em 120 m sobre o home.
+* O navlog usa um modelo simples de subida e descida e a elevação do home para limites "do solo"; não há
+  modelo de terreno ao longo da rota. O plano automático não escolhe níveis por sentido (regra semicircular)
+  nem procedimentos de saída e chegada (SID/STAR).
+* O simulador voa num plano local em torno do home: serve para testar a interface, não rotas de centenas de
+  quilômetros nem velocidades supersônicas, que o ArduPilot também não foi feito para voar.
 * O mapa de satélite padrão usa os tiles públicos da Esri, que exigem internet e atribuição.
   Para campo sem internet, sirva tiles locais e ajuste a URL em **Configurar → Estação**.

@@ -1,4 +1,4 @@
-// Geometria plana local (bom até alguns quilômetros do home).
+// Geometria: plana local (bom até alguns quilômetros do home) e de grande círculo (voos longos).
 
 const M_PER_DEG = 111_320
 
@@ -75,4 +75,73 @@ export function rectangle(center: LatLon, width: number, height: number): [numbe
     const p = enuToLatLon(center, e, n)
     return [p.lon, p.lat]
   })
+}
+
+// ---------- grande círculo (voos longos) ----------
+
+const R_EARTH = 6_371_000
+const rad = (d: number) => (d * Math.PI) / 180
+const deg = (r: number) => (r * 180) / Math.PI
+
+/** Rumo verdadeiro inicial de a para b, 0–360°. */
+export function bearing(a: LatLon, b: LatLon): number {
+  const la1 = rad(a.lat), la2 = rad(b.lat), dl = rad(b.lon - a.lon)
+  const y = Math.sin(dl) * Math.cos(la2)
+  const x = Math.cos(la1) * Math.sin(la2) - Math.sin(la1) * Math.cos(la2) * Math.cos(dl)
+  return (deg(Math.atan2(y, x)) + 360) % 360
+}
+
+/** Ponto a `d` metros de `p` no rumo `brg` (grande círculo). */
+export function destination(p: LatLon, brg: number, d: number): LatLon {
+  const la1 = rad(p.lat), lo1 = rad(p.lon), b = rad(brg), dr = d / R_EARTH
+  const la2 = Math.asin(Math.sin(la1) * Math.cos(dr) + Math.cos(la1) * Math.sin(dr) * Math.cos(b))
+  const lo2 = lo1 + Math.atan2(Math.sin(b) * Math.sin(dr) * Math.cos(la1), Math.cos(dr) - Math.sin(la1) * Math.sin(la2))
+  return { lat: deg(la2), lon: ((deg(lo2) + 540) % 360) - 180 }
+}
+
+/** Ponto na fração `f` (0–1) do grande círculo entre a e b. */
+export function intermediate(a: LatLon, b: LatLon, f: number): LatLon {
+  const d = distance(a, b) / R_EARTH
+  if (d < 1e-9) return { ...a }
+  const A = Math.sin((1 - f) * d) / Math.sin(d), B = Math.sin(f * d) / Math.sin(d)
+  const la1 = rad(a.lat), lo1 = rad(a.lon), la2 = rad(b.lat), lo2 = rad(b.lon)
+  const x = A * Math.cos(la1) * Math.cos(lo1) + B * Math.cos(la2) * Math.cos(lo2)
+  const y = A * Math.cos(la1) * Math.sin(lo1) + B * Math.cos(la2) * Math.sin(lo2)
+  const z = A * Math.sin(la1) + B * Math.sin(la2)
+  return { lat: deg(Math.atan2(z, Math.hypot(x, y))), lon: deg(Math.atan2(y, x)) }
+}
+
+/** Pontos do grande círculo de a a b, um a cada `step` metros no máximo (para desenhar ou voar). */
+export function greatCircle(a: LatLon, b: LatLon, step = 20_000): LatLon[] {
+  const n = Math.max(1, Math.ceil(distance(a, b) / step))
+  return Array.from({ length: n + 1 }, (_, i) => (i === 0 ? { ...a } : i === n ? { ...b } : intermediate(a, b, i / n)))
+}
+
+/** Desvio lateral (m) de p em relação à perna a→b: positivo à direita. */
+export function crossTrack(a: LatLon, b: LatLon, p: LatLon): number {
+  const d13 = distance(a, p) / R_EARTH
+  return Math.asin(Math.sin(d13) * Math.sin(rad(bearing(a, p) - bearing(a, b)))) * R_EARTH
+}
+
+/** Quanto de a→b já foi percorrido (m) até a projeção de p na perna. */
+export function alongTrack(a: LatLon, b: LatLon, p: LatLon): number {
+  const d13 = distance(a, p) / R_EARTH
+  const xt = crossTrack(a, b, p) / R_EARTH
+  const at = Math.acos(Math.max(-1, Math.min(1, Math.cos(d13) / Math.cos(xt)))) * R_EARTH
+  return Math.cos(rad(bearing(a, p) - bearing(a, b))) < 0 ? -at : at
+}
+
+/** Diferença angular b − a em −180…180. */
+export function angleDiff(a: number, b: number): number {
+  return ((((b - a) % 360) + 540) % 360) - 180
+}
+
+/** Ponto dentro do polígono (anel [lon, lat]), por paridade de cruzamentos. */
+export function inRing(p: LatLon, ring: [number, number][]): boolean {
+  let inside = false
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i], [xj, yj] = ring[j]
+    if (yi > p.lat !== yj > p.lat && p.lon < ((xj - xi) * (p.lat - yi)) / (yj - yi) + xi) inside = !inside
+  }
+  return inside
 }

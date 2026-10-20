@@ -39,6 +39,15 @@ pub struct Radio {
     pub fixed: u16,
 }
 
+/// Vento estimado pelo piloto automático (WIND do ArduPilot).
+#[derive(Serialize, Clone, Default)]
+pub struct Wind {
+    /// De onde o vento vem, em graus verdadeiros.
+    pub dir: f32,
+    pub speed: f32,
+    pub speed_z: f32,
+}
+
 #[derive(Serialize, Clone, Default)]
 pub struct MsgStat {
     pub count: u64,
@@ -94,6 +103,8 @@ pub struct Telemetry {
     pub msg_stats: BTreeMap<String, MsgStat>,
     /// Motor e energia: baterias, ESCs, EFI, gerador e sensores extras.
     pub propulsion: Propulsion,
+    /// Vento estimado; None até o veículo mandar (o ArduCopter só manda com a estimativa ligada).
+    pub wind: Option<Wind>,
 }
 
 /// Eventos pontuais que viram mensagens próprias para a interface.
@@ -206,6 +217,7 @@ impl State {
                     alt: h.altitude as f32 / 1000.0,
                 });
             }
+            WIND(w) => self.t.wind = Some(Wind { dir: w.direction.rem_euclid(360.0), speed: w.speed, speed_z: w.speed_z }),
             RANGEFINDER(r) => self.t.rangefinder = Some(r.distance),
             DISTANCE_SENSOR(d) => self.t.rangefinder = Some(d.current_distance as f32 / 100.0),
             VIBRATION(v) => {

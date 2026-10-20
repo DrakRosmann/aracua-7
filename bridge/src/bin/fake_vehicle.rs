@@ -53,9 +53,29 @@ struct Args {
     /// Endereço do vídeo da câmera simulada (MJPEG em http://ENDEREÇO/video.mjpg); "off" desliga
     #[arg(long, default_value = "127.0.0.1:8090")]
     camera: String,
+    /// Vento constante "DE/VELOCIDADE": de onde sopra (graus) e m/s, ex.: 270/6. Rajadas somam por cima.
+    #[arg(long, default_value = "0/0", value_parser = parse_wind)]
+    wind: (f64, f64),
     /// Sai quando a entrada padrão fechar (usado pelo app desktop)
     #[arg(long)]
     exit_with_parent: bool,
+}
+
+/// "270/6" → vetor do vento (leste, norte) em m/s, para onde ele empurra.
+fn parse_wind(v: &str) -> Result<(f64, f64), String> {
+    let (d, sp) = v.split_once('/').ok_or("use DE/VELOCIDADE, ex.: 270/6")?;
+    let (d, sp): (f64, f64) = (d.trim().parse().map_err(|_| "direção inválida")?, sp.trim().parse().map_err(|_| "velocidade inválida")?);
+    let r = d.to_radians();
+    Ok((-sp * r.sin(), -sp * r.cos()))
+}
+
+/// Altitude do item de missão sobre o home: itens em MSL (frame GLOBAL) descontam a altitude do home.
+fn rel_z(it: &MISSION_ITEM_INT_DATA) -> f64 {
+    if matches!(it.frame, MavFrame::MAV_FRAME_GLOBAL | MavFrame::MAV_FRAME_GLOBAL_INT) {
+        it.z as f64 - HOME_MSL as f64
+    } else {
+        it.z as f64
+    }
 }
 
 fn parse_propulsion(s: &str) -> Result<Propulsion, String> {
@@ -393,8 +413,8 @@ fn main() -> anyhow::Result<()> {
     let map_sock = UdpSocket::bind("0.0.0.0:0")?;
     let boxes = world();
     let (home_lat, home_lon) = (args.lat, args.lon);
-    let to_ll = |e: f64, n: f64| (home_lat + n / 111_320.0, home_lon + e / (111_320.0 * (home_lat * PI / 180.0).cos()));
-    let to_en = |lat: f64, lon: f64| ((lon - home_lon) * 111_320.0 * (home_lat * PI / 180.0).cos(), (lat - home_lat) * 111_320.0);
+    let to_ll = move |e: f64, n: f64| (home_lat + n / 111_320.0, home_lon + e / (111_320.0 * (home_lat * PI / 180.0).cos()));
+    let to_en = move |lat: f64, lon: f64| ((lon - home_lon) * 111_320.0 * (home_lat * PI / 180.0).cos(), (lat - home_lat) * 111_320.0);
 
     let class = args.vehicle;
     let common: &[(&str, f32)] = &[
@@ -485,6 +505,30 @@ fn main() -> anyhow::Result<()> {
                     drop(s);
                     ack(&send, c.command, ok);
                     continue;
+                }
+                // Desvio (DO_REPOSITION): vai para o ponto em GUIDED, na altura pedida.
+                MavMessage::COMMAND_INT(c) if c.command == MavCmd::MAV_CMD_DO_REPOSITION => {
+                    let ok = s.armed && s.alt > 1.0 && c.frame == MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT_INT;
+                    if ok {
+                        if (c.param2 as u32) & 1 == 1 && !s.is("GUIDED") {
+                            s.go("GUIDED");
+                        }
+                        s.guided_target = Some(to_en(c.x as f64 / 1e7, c.y as f64 / 1e7));
+                        s.guided_hdg = None;
+                        s.target_alt = c.z as f64;
+                        s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reposicionando para {:.5}, {:.5}", c.x as f64 / 1e7, c.y as f64 / 1e7));
+                    }
+                    drop(s);
+                    ack(&send, c.command, ok);
+                    continue;
+                }
+                MavMessage::MISSION_SET_CURRENT(m) => {
+                    if m.seq > 0 && (m.seq as usize) < s.mission.len() {
+                        s.cur = m.seq;
+                        s.leg_start = (s.e, s.n);
+                        s.loiter_until = None;
+                        s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Missão: indo para o item {}", m.seq));
+                    }
                 }
                 MavMessage::SET_POSITION_TARGET_LOCAL_NED(t) => {
                     if !s.class.fixed_wing() && s.is("GUIDED") {
@@ -771,8 +815,8 @@ fn main() -> anyhow::Result<()> {
                             dz = if d > 3.0 { 0.0 } else if s.alt > 6.0 { -2.0 } else { -0.7 };
                         }
                         Some(it) if it.command == MavCmd::MAV_CMD_NAV_TAKEOFF || it.command == MavCmd::MAV_CMD_NAV_VTOL_TAKEOFF => {
-                                dz = ((it.z as f64 - s.alt) * 0.9).clamp(0.4, 3.5);
-                                if s.alt >= it.z as f64 - 0.5 {
+                                dz = ((rel_z(&it) - s.alt) * 0.9).clamp(0.4, 3.5);
+                                if s.alt >= rel_z(&it) - 0.5 {
                                     s.cur += 1;
                                     s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
                                 }
@@ -780,8 +824,8 @@ fn main() -> anyhow::Result<()> {
                             Some(it) if it.command == MavCmd::MAV_CMD_NAV_WAYPOINT => {
                                 let (te, tn) = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
                                 let d;
-                                (de, dn, dz, dyaw, d) = goto(&s, te, tn, it.z as f64, wp_speed);
-                                if d < 2.0 && (s.alt - it.z as f64).abs() < 1.5 {
+                                (de, dn, dz, dyaw, d) = goto(&s, te, tn, rel_z(&it), wp_speed);
+                                if d < 2.0 && (s.alt - rel_z(&it)).abs() < 1.5 {
                                     s.cur += 1;
                                     s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
                                 }
@@ -798,7 +842,7 @@ fn main() -> anyhow::Result<()> {
                             Some(it) if it.command == MavCmd::MAV_CMD_NAV_LOITER_TIME => {
                                 let (te, tn) = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
                                 let d;
-                                (de, dn, dz, dyaw, d) = goto(&s, te, tn, it.z as f64, wp_speed);
+                                (de, dn, dz, dyaw, d) = goto(&s, te, tn, rel_z(&it), wp_speed);
                                 if d < 2.0 {
                                     let until = *s.loiter_until.get_or_insert(Instant::now() + Duration::from_secs_f32(it.param1.max(0.0)));
                                     if Instant::now() >= until {
@@ -810,6 +854,11 @@ fn main() -> anyhow::Result<()> {
                             }
                             Some(it) if it.command == MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH => {
                                 s.go_hover("RTL");
+                            }
+                            // Paira sobre o ponto sem fim (voo só de ida), continuando em AUTO.
+                            Some(it) if it.command == MavCmd::MAV_CMD_NAV_LOITER_UNLIM => {
+                                let (te, tn) = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
+                                (de, dn, dz, dyaw, _) = goto(&s, te, tn, rel_z(&it), wp_speed);
                             }
                             _ => {
                                 s.go_hover("LOITER");
@@ -858,8 +907,8 @@ fn main() -> anyhow::Result<()> {
             s.vn += (dn - s.vn) * k;
             s.vz += (dz - s.vz) * (1.0 - (-dt * 3.0f64).exp());
             if air {
-                wind.0 += (rand_gauss(tick) * 1.2 - wind.0) * dt * 0.8;
-                wind.1 += (rand_gauss(tick + 7) * 1.2 - wind.1) * dt * 0.8;
+                wind.0 += (args.wind.0 + rand_gauss(tick) * 1.2 - wind.0) * dt * 0.8;
+                wind.1 += (args.wind.1 + rand_gauss(tick + 7) * 1.2 - wind.1) * dt * 0.8;
                 s.ve += wind.0 * dt * 0.6;
                 s.vn += wind.1 * dt * 0.6;
             }
@@ -895,7 +944,7 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         } else {
-            fixed_wing_step(&mut s, dt, &p, &to_en, &mut wind, tick);
+            fixed_wing_step(&mut s, dt, &p, &to_en, &mut wind, args.wind, tick);
         }
         let air = s.alt > 0.15;
         let sp = s.ve.hypot(s.vn);
@@ -1088,6 +1137,13 @@ fn main() -> anyhow::Result<()> {
         if tick.is_multiple_of(100) {
             send(MavMessage::HOME_POSITION(HOME_POSITION_DATA { latitude: (home_lat * 1e7) as i32, longitude: (home_lon * 1e7) as i32, altitude: (HOME_MSL * 1000.0) as i32, ..Default::default() }));
         }
+        if tick.is_multiple_of(50) {
+            // Vento estimado (o ArduPilot manda WIND): de onde sopra, como o firmware.
+            let w = if alt > 1.0 { wind } else { args.wind };
+            let speed = w.0.hypot(w.1);
+            let dir = if speed < 0.05 { 0.0 } else { (-w.0).atan2(-w.1).to_degrees().rem_euclid(360.0) };
+            send(MavMessage::WIND(WIND_DATA { direction: dir as f32, speed: speed as f32, speed_z: 0.0 }));
+        }
         if tick.is_multiple_of(25) {
             let all = MavSysStatusSensor::all();
             send(MavMessage::SYS_STATUS(SYS_STATUS_DATA {
@@ -1153,6 +1209,7 @@ fn fixed_wing_step(
     p: &dyn Fn(&str, f32) -> f64,
     to_en: &dyn Fn(f64, f64) -> (f64, f64),
     wind: &mut (f64, f64),
+    steady: (f64, f64),
     tick: u64,
 ) {
     let cruise = p("AIRSPEED_CRUISE", 18.0).max(STALL_MS + 3.0);
@@ -1248,7 +1305,7 @@ fn fixed_wing_step(
                         bank_cmd = Some(0.0);
                         takeoff_roll = true;
                         climb_cmd = Some(if s.airspeed > STALL_MS + 1.0 { 4.0 } else { 0.0 });
-                        if !on_ground && s.alt >= it.z as f64 - 2.0 {
+                        if !on_ground && s.alt >= rel_z(&it) - 2.0 {
                             s.cur += 1;
                             s.leg_start = (s.e, s.n);
                             s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
@@ -1257,7 +1314,7 @@ fn fixed_wing_step(
                     Some(it) if it.command == MavCmd::MAV_CMD_NAV_WAYPOINT => {
                         let (te, tn) = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
                         target_hdg = Some(bearing(s, te, tn));
-                        target_alt = it.z as f64;
+                        target_alt = rel_z(&it);
                         // Como o ArduPlane: chega dentro do raio (param2, ou WP_RADIUS) ou ao cruzar a
                         // linha perpendicular à perna no ponto.
                         let accept = if it.param2 > 0.0 { it.param2 as f64 } else { wp_radius };
@@ -1295,7 +1352,7 @@ fn fixed_wing_step(
                     }
                     Some(it) if it.command == MavCmd::MAV_CMD_NAV_LOITER_TIME => {
                         let c = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
-                        target_alt = it.z as f64;
+                        target_alt = rel_z(&it);
                         let d = (c.0 - s.e).hypot(c.1 - s.n);
                         if s.loiter_until.is_none() && d > radius * 1.3 {
                             target_hdg = Some(bearing(s, c.0, c.1));
@@ -1308,6 +1365,13 @@ fn fixed_wing_step(
                                 s.say(MavSeverity::MAV_SEVERITY_INFO, format!("Reached command #{idx}"));
                             }
                         }
+                    }
+                    // Circular sem fim sobre o ponto (fim de um voo só de ida), continuando em AUTO.
+                    Some(it) if it.command == MavCmd::MAV_CMD_NAV_LOITER_UNLIM => {
+                        let c = to_en(it.x as f64 / 1e7, it.y as f64 / 1e7);
+                        target_alt = rel_z(&it);
+                        let d = (c.0 - s.e).hypot(c.1 - s.n);
+                        target_hdg = Some(if d > radius * 1.3 { bearing(s, c.0, c.1) } else { orbit_hdg(s, c, radius) });
                     }
                     Some(it) if it.command == MavCmd::MAV_CMD_DO_SET_SERVO => {
                         s.set_servo(it.param1 as usize, it.param2 as u16);
@@ -1363,8 +1427,8 @@ fn fixed_wing_step(
     s.vz += (vz - s.vz) * (1.0 - (-dt * 1.5f64).exp());
 
     if !on_ground {
-        wind.0 += (rand_gauss(tick) * 1.5 - wind.0) * dt * 0.5;
-        wind.1 += (rand_gauss(tick + 7) * 1.5 - wind.1) * dt * 0.5;
+        wind.0 += (steady.0 + rand_gauss(tick) * 1.5 - wind.0) * dt * 0.5;
+        wind.1 += (steady.1 + rand_gauss(tick + 7) * 1.5 - wind.1) * dt * 0.5;
     }
     let (sh, ch) = (s.hdg.to_radians().sin(), s.hdg.to_radians().cos());
     let w = if on_ground { (0.0, 0.0) } else { *wind };

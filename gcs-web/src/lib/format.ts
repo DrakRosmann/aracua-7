@@ -6,7 +6,8 @@ export const fmtTime = (s: number) => {
 export const fmtDist = (m: number) => (m >= 1000 ? `${(m / 1000).toFixed(2)} km` : `${m.toFixed(0)} m`)
 
 export const fmtDuration = (s: number) =>
-  s >= 60 ? `${Math.floor(s / 60)} min ${String(Math.round(s % 60)).padStart(2, '0')} s` : `${Math.round(s)} s`
+  s >= 3600 ? `${Math.floor(s / 3600)} h ${String(Math.round((s % 3600) / 60)).padStart(2, '0')} min`
+    : s >= 60 ? `${Math.floor(s / 60)} min ${String(Math.round(s % 60)).padStart(2, '0')} s` : `${Math.round(s)} s`
 
 export const clock = (ms: number) => new Date(ms).toLocaleTimeString('pt-BR', { hour12: false })
 

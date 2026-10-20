@@ -29,7 +29,27 @@ pub enum Command {
         /// Velocidade de cruzeiro do avião (m/s), para soltar a carga em voo.
         #[serde(default)]
         cruise_ms: Option<f32>,
+        /// Altitudes dos waypoints acima do nível do mar em vez de relativas ao home.
+        #[serde(default)]
+        alt_msl: bool,
+        /// Termina circulando sobre o último waypoint (voo só de ida).
+        #[serde(default)]
+        loiter_at_end: bool,
     },
+    /// Pula para outro item da missão ("direto para"); no ar e fora de AUTO, entra em AUTO.
+    MissionCurrent { seq: u16 },
+    /// Vai já para um ponto (desvio para um aeródromo, por exemplo): DO_REPOSITION, entra em GUIDED.
+    /// `alt` é relativa ao home; sem ela, mantém a altura atual.
+    Goto { lat: f64, lon: f64, #[serde(default)] alt: Option<f32> },
+    // ---- Cartas aeronáuticas ----
+    /// Baixa as cartas do DECEA (aerovias, fixos, auxílios, aeródromos, espaços aéreos).
+    ChartsFetch { #[serde(default)] url: Option<String> },
+    /// Pede as cartas completas (respondidas só a quem pediu; ver main.rs).
+    ChartsGet,
+    /// Troca as cartas pelas de um arquivo no formato aracua-charts.
+    ChartsImport { pack: Box<crate::charts::Pack> },
+    /// Apaga as cartas guardadas.
+    ChartsClear,
     /// Lê a missão que está no veículo.
     MissionDownload,
     /// Envia a geocerca (polígonos e círculos). `enable` liga FENCE_ENABLE.
@@ -105,6 +125,7 @@ fn allowed_in_replay(c: &Command) -> bool {
     matches!(
         c,
         Command::Replay { .. } | Command::MapReset | Command::PayloadGet
+            | Command::ChartsFetch { .. } | Command::ChartsGet | Command::ChartsImport { .. } | Command::ChartsClear
             | Command::MaintenanceGet | Command::MaintenanceConfig { .. } | Command::MaintenanceDone { .. } | Command::MaintenanceNote { .. }
     )
 }
@@ -266,7 +287,7 @@ pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
             }
             link.command_long(MavCmd::MAV_CMD_NAV_TAKEOFF, [0.0, 0.0, 0.0, f32::NAN, 0.0, 0.0, alt]);
         }
-        Command::MissionUpload { items, rtl_at_end, land_at_end, approach_deg, cruise_ms } => {
+        Command::MissionUpload { items, rtl_at_end, land_at_end, approach_deg, cruise_ms, alt_msl, loiter_at_end } => {
             if items.is_empty() {
                 return Err("missão vazia".into());
             }
@@ -313,8 +334,14 @@ pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
                 rtl_at_end,
                 land_at_end,
                 approach_deg,
-                cruise_ms: cruise_ms.filter(|v| (5.0..=80.0).contains(v)).unwrap_or(18.0),
+                // Até hipersônicos (~Mach 8); só serve para o ponto de soltura da carga em voo.
+                cruise_ms: cruise_ms.filter(|v| (5.0..=3000.0).contains(v)).unwrap_or(18.0),
+                alt_msl,
+                loiter_at_end,
             };
+            if alt_msl && !shared.state.lock().unwrap().t.home.is_some() {
+                return Err("altitudes MSL: o veículo ainda não definiu o home".into());
+            }
             // ArduPlane 4.6+ não arma com DO_LAND_START na missão e RTL_AUTOLAND desligado.
             if land_at_end && class == modes::VehicleClass::Plane {
                 let cur = shared.state.lock().unwrap().params.get("RTL_AUTOLAND").copied();
@@ -326,6 +353,81 @@ pub async fn execute(shared: &Arc<Shared>, cmd: Command) -> Result<(), String> {
             }
             let built = crate::mission::build(link.target(), home, &items, &drops, opts);
             shared.mission.lock().unwrap().start(link, built);
+        }
+        Command::MissionCurrent { seq } => {
+            let count = shared.vehicle_mission.lock().unwrap().as_ref().map(|m| m.count).unwrap_or(0);
+            if seq == 0 || seq >= count {
+                return Err(format!("item {seq} não existe na missão do veículo ({count} itens)"));
+            }
+            let (ts, tc) = link.target();
+            link.send(&MavMessage::MISSION_SET_CURRENT(MISSION_SET_CURRENT_DATA { seq, target_system: ts, target_component: tc }));
+            let t = shared.state.lock().unwrap().t.clone();
+            if t.armed && t.alt_rel > 1.0 && t.mode != "AUTO" {
+                set_mode(shared, "AUTO")?;
+            }
+        }
+        Command::Goto { lat, lon, alt } => {
+            if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) || (lat == 0.0 && lon == 0.0) {
+                return Err("desvio: posição inválida".into());
+            }
+            let t = shared.state.lock().unwrap().t.clone();
+            if !t.armed || t.alt_rel < 1.0 {
+                return Err("desvio: o veículo precisa estar no ar".into());
+            }
+            let alt = alt.unwrap_or(t.alt_rel).max(10.0);
+            // param2 = 1: muda para GUIDED. Avião e multirrotor ignoram o rumo (param4).
+            link.command_int_at(MavCmd::MAV_CMD_DO_REPOSITION, MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT_INT, [-1.0, 1.0, 0.0, 0.0], (lat, lon), alt);
+        }
+        Command::ChartsFetch { url } => {
+            {
+                let mut c = shared.charts.lock().unwrap();
+                if c.busy {
+                    return Err("as cartas já estão sendo baixadas".into());
+                }
+                c.busy = true;
+                c.error = None;
+            }
+            shared.emit_charts();
+            let base = url.filter(|u| u.starts_with("http")).unwrap_or_else(|| shared.charts_url.clone());
+            let s = shared.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                let total = crate::charts::DECEA_LAYERS.len();
+                let mut layers = std::collections::HashMap::new();
+                for (i, (layer, label)) in crate::charts::DECEA_LAYERS.iter().enumerate() {
+                    s.emit(serde_json::json!({"type":"charts_status","step":label,"done":i,"total":total}));
+                    layers.insert(layer.to_string(), crate::charts::fetch_layer(&base, layer)?);
+                }
+                Ok::<_, String>(crate::charts::from_decea(&layers, now_ms()))
+            })
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|r| r);
+            let res = {
+                let mut c = shared.charts.lock().unwrap();
+                c.busy = false;
+                let r = res.and_then(|p| c.replace(p));
+                if let Err(e) = &r {
+                    c.error = Some(e.clone());
+                }
+                r
+            };
+            shared.emit_charts();
+            match res {
+                Ok(()) => tracing::info!("cartas baixadas do DECEA"),
+                Err(e) => return Err(format!("cartas: {e}")),
+            }
+        }
+        Command::ChartsGet => {}
+        Command::ChartsImport { mut pack } => {
+            if pack.fetched == 0 {
+                pack.fetched = now_ms();
+            }
+            shared.charts.lock().unwrap().replace(*pack).map_err(|e| format!("cartas: {e}"))?;
+            shared.emit_charts();
+        }
+        Command::ChartsClear => {
+            shared.charts.lock().unwrap().clear();
+            shared.emit_charts();
         }
         Command::MissionDownload => {
             if shared.mission.lock().unwrap().is_active() {
@@ -694,6 +796,22 @@ mod tests {
         assert!(allowed_in_replay(&Command::Replay { speed: None, paused: Some(true), seek: None }));
         assert!(!allowed_in_replay(&Command::Arm { arm: true, force: false }));
         assert!(!allowed_in_replay(&Command::Takeoff { alt: 10.0, force: true }));
+        assert!(allowed_in_replay(&Command::ChartsGet));
+        assert!(!allowed_in_replay(&Command::Goto { lat: -23.0, lon: -46.0, alt: None }));
+    }
+
+    #[test]
+    fn comandos_de_longo_alcance() {
+        let c: Command = serde_json::from_str(r#"{"cmd":"mission_upload","items":[{"lat":-23.5,"lon":-46.6,"alt":900,"name":"VUREM"}],"alt_msl":true,"loiter_at_end":true}"#).unwrap();
+        assert!(matches!(c, Command::MissionUpload { alt_msl: true, loiter_at_end: true, .. }));
+        assert!(matches!(serde_json::from_str::<Command>(r#"{"cmd":"mission_current","seq":5}"#).unwrap(), Command::MissionCurrent { seq: 5 }));
+        let c: Command = serde_json::from_str(r#"{"cmd":"goto","lat":-23.6,"lon":-46.65}"#).unwrap();
+        assert!(matches!(c, Command::Goto { alt: None, .. }));
+        assert!(matches!(serde_json::from_str::<Command>(r#"{"cmd":"charts_fetch"}"#).unwrap(), Command::ChartsFetch { url: None }));
+        let c: Command = serde_json::from_str(r#"{"cmd":"charts_import","pack":{"format":"aracua-charts","version":1,"source":"teste","fixes":[{"id":"ABC","kind":"wpt","lat":-23,"lon":-46}]}}"#).unwrap();
+        let Command::ChartsImport { pack } = c else { panic!() };
+        assert_eq!(pack.fixes[0].id, "ABC");
+        pack.validate().unwrap();
     }
 
     #[test]

@@ -10,6 +10,7 @@ import { OfflineMap } from '../components/OfflineMap'
 import { MaintenanceView } from '../components/Maintenance'
 import { EngineSetup } from '../components/Engine'
 import { PadSetup } from '../components/Gamepad'
+import { LongRangeSetup } from '../components/LongRange'
 import { flightCards, rtlAltParam, safetyCards, type PCard, type PField } from '../lib/params'
 import { t, tk } from '../lib/i18n'
 import { classLabel, vehicleClass } from '../types'
@@ -190,6 +191,7 @@ const PAGES = [
   { id: 'motor', label: tk('Motor') },
   { id: 'controle', label: tk('Controle') },
   { id: 'entrega', label: tk('Entrega') },
+  { id: 'longo', label: tk('Longo alcance') },
   { id: 'manut', label: tk('Manutenção') },
   { id: 'estacao', label: tk('Estação') },
 ] as const
@@ -225,6 +227,7 @@ export function SetupView() {
         {page === 'motor' && <EngineSetup />}
         {page === 'controle' && <PadSetup />}
         {page === 'entrega' && <DeliverySetup />}
+        {page === 'longo' && <LongRangeSetup />}
         {page === 'manut' && <MaintenanceView />}
         {page === 'estacao' && <StationSettings />}
       </div>

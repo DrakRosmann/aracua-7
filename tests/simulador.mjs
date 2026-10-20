@@ -390,6 +390,72 @@ const falhas = await suite('Ponte + simulador', [
       } finally { s.stop() }
     }
   }],
+
+  ['longo alcance: cartas importadas, guardadas e entregues só a quem pede', async () => {
+    const s = await pilha({ sim: false, bridgeArgs: ['--charts-file', join(tempDir('cartas'), 'cartas.json')] })
+    try {
+      const a = await new Ponte(s.url).connect()
+      const b = await new Ponte(s.url).connect()
+      await a.until(() => a.msgs.some((m) => m.type === 'charts_info' && !m.loaded), 5_000, 'charts_info vazio')
+      const pack = {
+        format: 'aracua-charts', version: 1, source: 'teste', effective: '2026-10-01', next: '2026-10-29',
+        fixes: [{ id: 'ALFA', kind: 'wpt', lat: -23.5, lon: -46.6 }],
+        airports: [{ id: 'SBSP', name: 'Congonhas', lat: -23.6261, lon: -46.6564, ifr: true, public: true }],
+        airways: [{ airway: 'W1', from: 'ALFA', to: 'SBSP', dir: 'both', coords: [[-46.6, -23.5], [-46.6564, -23.6261]] }],
+        airspaces: [],
+      }
+      a.send({ cmd: 'charts_import', pack: { ...pack, format: 'outro' } })
+      await a.next('error', 5_000, (m) => m.message.startsWith('cartas:'))
+      a.send({ cmd: 'charts_import', pack })
+      const info = await b.next('charts_info', 5_000, (m) => m.loaded)
+      if (info.counts.airways !== 1 || info.effective !== '2026-10-01') throw new Error(`resumo errado: ${JSON.stringify(info)}`)
+      a.send({ cmd: 'charts_get' })
+      const got = await a.next('charts', 5_000)
+      if (got.airways[0].airway !== 'W1' || !got.fetched) throw new Error('cartas vieram erradas')
+      await sleep(300)
+      if (b.msgs.some((m) => m.type === 'charts')) throw new Error('as cartas inteiras foram para quem não pediu')
+      a.close(); b.close()
+    } finally { s.stop() }
+    // Reiniciada, a ponte relê o arquivo.
+    const dir = tempDir('cartas2')
+    const s2 = await pilha({ sim: false, bridgeArgs: ['--charts-file', join(dir, 'cartas.json')] })
+    try {
+      const c = await new Ponte(s2.url).connect()
+      c.send({ cmd: 'charts_import', pack: { format: 'aracua-charts', version: 1, source: 'x', fixes: [{ id: 'B', kind: 'wpt', lat: 1, lon: 1 }] } })
+      await c.next('charts_info', 5_000, (m) => m.loaded)
+      c.close()
+    } finally { s2.stop() }
+    const s3 = await pilha({ sim: false, bridgeArgs: ['--charts-file', join(dir, 'cartas.json')] })
+    try {
+      const c = await new Ponte(s3.url).connect()
+      await c.until(() => c.msgs.some((m) => m.type === 'charts_info' && m.loaded && m.counts.fixes === 1), 5_000, 'cartas relidas do arquivo')
+      c.close()
+    } finally { s3.stop() }
+  }],
+
+  ['longo alcance (avião): vento, altitudes MSL, direto para, circular no destino e desvio', async () => {
+    const s = await pilha({ vehicle: 'plane' })
+    try {
+      const c = await s.cliente()
+      await c.until(() => c.t.wind, 5_000, 'mensagem WIND')
+      const homeMsl = c.t.home.alt
+      const pts = [desloca(HOME, 0, 700), desloca(HOME, 700, 700), desloca(HOME, 700, 0)]
+      await voarMissao(c, { items: pts.map((p) => ({ ...p, alt: homeMsl + 60 })), alt_msl: true, loiter_at_end: true, rtl_at_end: false }, 0)
+      if (!c.mission.alt_msl || !c.mission.loiter_at_end) throw new Error(`missão sem MSL ou sem circular no fim: ${JSON.stringify(c.mission)}`)
+      // Sobe até a altitude MSL pedida (60 m sobre o home).
+      await c.until(() => c.t.mission_current >= c.mission.wp_seq[0] && c.t.alt_rel > 45, 90_000, 'subir para o primeiro waypoint em MSL')
+      c.send({ cmd: 'mission_current', seq: c.mission.wp_seq[2] })
+      await c.until(() => c.t.mission_current === c.mission.wp_seq[2], 5_000, 'direto para o último ponto')
+      await c.until(() => c.t.mission_current > c.mission.wp_seq[2], 90_000, 'chegar ao último ponto')
+      const alvo = desloca(HOME, -600, -600)
+      c.send({ cmd: 'goto', lat: alvo.lat, lon: alvo.lon, alt: 70 })
+      await c.until(() => c.t.mode === 'GUIDED', 5_000, 'desvio em GUIDED')
+      await c.until(() => metros(c.t, alvo) < 250, 90_000, 'chegar ao ponto do desvio')
+      c.send({ cmd: 'mission_current', seq: 999 })
+      await c.next('error', 5_000, (m) => m.message.includes('não existe'))
+      c.close()
+    } finally { s.stop() }
+  }],
 ])
 
 process.exit(falhas ? 1 : 0)

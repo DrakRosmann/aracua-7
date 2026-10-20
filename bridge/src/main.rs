@@ -4,6 +4,7 @@
 #![allow(deprecated)]
 
 mod autopilot;
+mod charts;
 mod commands;
 mod link;
 mod maintenance;
@@ -59,6 +60,12 @@ struct Args {
     /// Registro de manutenção (horas de voo, baterias, tarefas)
     #[arg(long, default_value = "manutencao.json")]
     maintenance_file: PathBuf,
+    /// Cartas aeronáuticas guardadas (aerovias, fixos, aeródromos, espaços aéreos)
+    #[arg(long, default_value = "cartas.json")]
+    charts_file: PathBuf,
+    /// GeoServer (WFS) de onde baixar as cartas
+    #[arg(long, default_value = charts::DECEA_URL)]
+    charts_url: String,
     /// Sai quando a entrada padrão fechar (usado pelo app desktop)
     #[arg(long)]
     exit_with_parent: bool,
@@ -88,6 +95,8 @@ pub struct Shared {
     pub payload: Mutex<payload::Payload>,
     pub maintenance: Mutex<maintenance::Maintenance>,
     pub autopilot: Mutex<autopilot::Autopilot>,
+    pub charts: Mutex<charts::Charts>,
+    pub charts_url: String,
     pub tx: broadcast::Sender<Out>,
     pub clients: AtomicUsize,
     map_history: Mutex<(Vec<Arc<Vec<u8>>>, usize)>,
@@ -113,6 +122,11 @@ impl Shared {
             alt_rel: s.t.alt_rel,
             groundspeed: s.t.groundspeed,
         }
+    }
+    /// Resumo das cartas (as cartas inteiras só vão a quem pede).
+    pub fn emit_charts(&self) {
+        let v = self.charts.lock().unwrap().info();
+        self.emit(v);
     }
     pub fn emit_maintenance(&self) {
         let v = self.maintenance.lock().unwrap().view();
@@ -474,14 +488,25 @@ async fn client(shared: Arc<Shared>, stream: tokio::net::TcpStream, mavlink_addr
     if let Some(v) = fv {
         sink.send(WsMsg::text(v.to_string())).await?;
     }
+    let cv = shared.charts.lock().unwrap().info();
+    sink.send(WsMsg::text(cv.to_string())).await?;
     shared.clients.fetch_add(1, Ordering::SeqCst);
     let history: Vec<_> = shared.map_history.lock().unwrap().0.clone();
     for frame in history {
         sink.send(WsMsg::binary(frame.as_ref().clone())).await?;
     }
+    // Respostas só para esta interface (as cartas são grandes demais para mandar a todas).
+    let (direct, mut direct_rx) = tokio::sync::mpsc::unbounded_channel::<Arc<String>>();
     let writer = tokio::spawn(async move {
         loop {
-            match rx.recv().await {
+            let got = tokio::select! {
+                d = direct_rx.recv() => match d {
+                    Some(t) => Ok(Out::Text(t)),
+                    None => break,
+                },
+                r = rx.recv() => r,
+            };
+            match got {
                 Ok(Out::Text(t)) => {
                     if sink.send(WsMsg::text(t.as_str())).await.is_err() {
                         break;
@@ -504,6 +529,15 @@ async fn client(shared: Arc<Shared>, stream: tokio::net::TcpStream, mavlink_addr
             _ => continue,
         };
         match serde_json::from_str::<commands::Command>(&text) {
+            Ok(commands::Command::ChartsGet) => {
+                let m = shared.charts.lock().unwrap().message();
+                match m {
+                    Some(m) => {
+                        let _ = direct.send(m);
+                    }
+                    None => shared.emit(json!({"type":"error","message":"cartas: nenhuma carta guardada na ponte"})),
+                }
+            }
             Ok(cmd) => {
                 tracing::debug!("comando de {peer}: {cmd:?}");
                 let s = shared.clone();
@@ -578,6 +612,8 @@ async fn main() -> anyhow::Result<()> {
         payload: Mutex::new(payload::Payload::load(Some(args.payload_file.clone()))),
         maintenance: Mutex::new(maintenance::Maintenance::load(Some(args.maintenance_file.clone()))),
         autopilot: Mutex::new(Default::default()),
+        charts: Mutex::new(charts::Charts::load(Some(args.charts_file.clone()))),
+        charts_url: args.charts_url.clone(),
         tx,
         clients: AtomicUsize::new(0),
         map_history: Mutex::new((Vec::new(), 0)),

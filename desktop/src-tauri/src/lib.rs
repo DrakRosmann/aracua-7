@@ -340,6 +340,7 @@ fn start_link(app: tauri::AppHandle, sup: State<'_, Supervisor>, config: LinkCon
     std::fs::create_dir_all(&data).map_err(|e| format!("não foi possível criar {}: {e}", data.display()))?;
     let payload = data.join("entrega.json");
     let maintenance = data.join("manutencao.json");
+    let charts = data.join("cartas.json");
 
     Supervisor::push_log(&sup.log, format!("— conectando: {url}"));
     // O token vai por variável de ambiente (ARACUA_TOKEN): não aparece na lista de processos.
@@ -352,6 +353,8 @@ fn start_link(app: tauri::AppHandle, sup: State<'_, Supervisor>, config: LinkCon
         payload.to_string_lossy().into_owned(),
         "--maintenance-file".into(),
         maintenance.to_string_lossy().into_owned(),
+        "--charts-file".into(),
+        charts.to_string_lossy().into_owned(),
     ];
     if let LinkConfig::Replay { file } = &config {
         let f = PathBuf::from(file);

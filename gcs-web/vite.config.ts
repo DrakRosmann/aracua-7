@@ -7,5 +7,5 @@ export default defineConfig({
   server: { host: true },
   worker: { format: 'es' },
   // O MapLibre sozinho passa de 1 MB; não é problema para uma estação de solo.
-  build: { chunkSizeWarningLimit: 1600 },
+  build: { chunkSizeWarningLimit: 1800 },
 })

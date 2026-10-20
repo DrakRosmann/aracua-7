@@ -7,6 +7,7 @@ import { distance, survey, type LatLon } from '../lib/geo'
 import { Icon } from '../components/Icons'
 import { DropPicker } from '../components/Delivery'
 import { FenceEditor } from '../components/FenceEditor'
+import { AutoPlan, ChartsButton, NavlogSection, RouteForm } from '../components/LongRange'
 import { vehicleClass, type MissionItem } from '../types'
 import { t as tr } from '../lib/i18n'
 
@@ -39,6 +40,8 @@ function PlanRail() {
         <button className={`rb ${station.addMode ? 'on' : ''}`} onClick={() => { station.addMode = !station.addMode; station.emit('ui') }}><Icon.pinAdd />{tr('Waypoint')}</button>
         <button className={`rb ${station.surveyPreview ? 'on' : ''}`} onClick={() => document.getElementById('survey')?.toggleAttribute('open')}><Icon.grid />{tr('Varredura')}</button>
         <button className={`rb ${station.drawing ? 'on' : ''}`} onClick={() => document.getElementById('fence')?.toggleAttribute('open')}><Icon.fence />{tr('Geocerca')}</button>
+        <button className="rb" title={tr('Rota por aerovias, como no plano de voo')} onClick={() => document.getElementById('route')?.toggleAttribute('open')}><Icon.route />{tr('Rota')}</button>
+        <ChartsButton top={250} />
         <button className="rb" onClick={() => station.telem?.lat && station.mapApi?.flyTo(station.telem)}><Icon.target />{tr('Veículo')}</button>
         <button className="rb" onClick={() => {
           const pts: LatLon[] = [...station.plan, ...station.fenceDraft.inclusion.flat(), ...station.fenceDraft.exclusion.flat()]
@@ -83,7 +86,7 @@ function SurveyForm() {
           <label>{tr('Largura (m)')}<input type="number" value={p.width} onChange={num('width', 20, 2000)} /></label>
           <label>{tr('Altura (m)')}<input type="number" value={p.height} onChange={num('height', 20, 2000)} /></label>
           <label>{tr('Espaçamento (m)')}<input type="number" value={p.spacing} onChange={num('spacing', 5, 300)} /></label>
-          <label>{tr('Altitude (m)')}<input type="number" value={p.alt} onChange={num('alt', 5, 120)} /></label>
+          <label>{tr('Altitude (m)')}<input type="number" value={p.alt} onChange={num('alt', 5, station.maxAlt())} /></label>
           <label>{tr('Linhas')}<select value={p.northSouth ? 'ns' : 'ew'} onChange={(e) => setP({ ...p, northSouth: e.target.value === 'ns' })}><option value="ew">{tr('Leste–oeste')}</option><option value="ns">{tr('Norte–sul')}</option></select></label>
           <label className="row"><input type="checkbox" checked={p.replace} onChange={(e) => setP({ ...p, replace: e.target.checked })} />{tr('Substituir plano')}</label>
         </div>
@@ -99,10 +102,14 @@ function PlanPanel() {
   const [json, setJson] = useState<string | null>(null)
   const plan = station.plan
   const home = station.telem?.home ?? null
-  const { d, t, pct } = stats(plan, home)
+  // Com o home conhecido vale o navlog (perfil da aeronave, vento, grande círculo); senão, a estimativa simples.
+  const nl = station.navlog(plan)
+  const perf = station.settings.longRange.perf
+  const simple = stats(plan, home)
+  const { d, t, pct } = nl ? { d: nl.dist, t: nl.time, pct: (nl.energy / perf.capacity) * 100 } : simple
   const remaining = station.telem?.battery.remaining ?? -1
   const reserve = 20
-  const tooLong = remaining >= 0 && plan.length > 0 && pct > remaining - reserve
+  const tooLong = !nl && remaining >= 0 && plan.length > 0 && pct > remaining - reserve
   const set = (items: MissionItem[], sel = station.selected) => station.setPlan(items, sel)
   const move = (i: number, j: number) => {
     if (j < 0 || j >= plan.length) return
@@ -125,22 +132,23 @@ function PlanPanel() {
           <div className="val"><span>{tr('Waypoints')}</span><b>{plan.length}</b></div>
           <div className="val"><span>{tr('Distância total')}</span><b>{plan.length ? fmtDist(d) : '—'}</b></div>
           <div className="val"><span>{tr('Tempo estimado')}</span><b>{plan.length ? fmtDuration(t) : '—'}</b></div>
-          <div className="val"><span>{tr('Bateria estimada')}</span><b>{plan.length ? `${pct.toFixed(0)}` : '—'}{plan.length ? <small>%</small> : null}</b></div>
+          <div className="val"><span>{nl && perf.energy === 'fuel' ? tr('Combustível estimado') : tr('Bateria estimada')}</span><b>{plan.length ? `${pct.toFixed(0)}` : '—'}{plan.length ? <small>%</small> : null}</b></div>
         </div>
         <div className="db top-line">
           <label className="num">{tr('Altitude dos novos WPs')}
-            <input type="number" min={5} max={120} value={station.settings.wpAlt} onChange={(e) => station.saveSettings({ wpAlt: clamp(+e.target.value || 40, 5, 120) })} /> m
+            <input type="number" min={5} max={station.maxAlt()} value={station.settings.wpAlt} onChange={(e) => station.saveSettings({ wpAlt: clamp(+e.target.value || 40, 5, station.maxAlt()) })} /> m{station.settings.longRange.altMsl ? ' MSL' : ''}
           </label>
           <div className="hint">{tr('Com *Waypoint* ligado, clique no mapa para adicionar. Arraste um ponto para movê-lo.').split('*').map((part, i) => (i % 2 ? <b key={i}>{part}</b> : part))}</div>
+          {nl && nl.margin < 0 && <div className="warnbox">{tr('A rota pede {pct}% da energia do perfil, além da reserva: veja o navlog.', { pct: pct.toFixed(0) })}</div>}
           {tooLong && <div className="warnbox">{tr('A rota pede cerca de {pct}% da bateria e restam {left}%. Reserve pelo menos {reserve}% para o retorno.', { pct: pct.toFixed(0), left: remaining, reserve })}</div>}
         </div>
         <div className="wplist">
           {plan.map((w, i) => (
             <div key={i} className={`wprow ${i === station.selected ? 'sel' : ''}`} onClick={() => { station.select(i); station.mapApi?.flyTo(w) }}>
-              <span className="wpb">{wpName(i)}</span>
+              <span className={`wpb ${w.name ? 'named' : ''}`} title={w.name}>{w.name ?? wpName(i)}</span>
               <small>{fmtDist(distance(i ? plan[i - 1] : home ?? w, w))} {i ? tr('do anterior') : tr('do home')}{w.drop?.length ? <span className="dropb"> · ↓ {w.drop.map((id) => station.payloadName(id)).join(', ')}</span> : null}</small>
-              <input type="number" min={5} max={120} value={Math.round(w.alt)} aria-label={tr('Altitude do waypoint {v0}', { v0: wpName(i) })} onClick={(e) => e.stopPropagation()}
-                onChange={(e) => set(plan.map((x, j) => (j === i ? { ...x, alt: clamp(+e.target.value || x.alt, 5, 120) } : x)))} />
+              <input type="number" min={5} max={station.maxAlt()} value={Math.round(w.alt)} aria-label={tr('Altitude do waypoint {v0}', { v0: w.name ?? wpName(i) })} onClick={(e) => e.stopPropagation()}
+                onChange={(e) => set(plan.map((x, j) => (j === i ? { ...x, alt: clamp(+e.target.value || x.alt, 5, station.maxAlt()) } : x)))} />
               <span onClick={(e) => e.stopPropagation()}>
                 <button className="ib" aria-label={tr('Subir')} onClick={() => move(i, i - 1)}>↑</button>
                 <button className="ib" aria-label={tr('Descer')} onClick={() => move(i, i + 1)}>↓</button>
@@ -151,6 +159,9 @@ function PlanPanel() {
           ))}
           {!plan.length && <div className="empty">{tr('Nenhum waypoint. Clique no mapa ou gere uma varredura.')}</div>}
         </div>
+        <AutoPlan />
+        <RouteForm />
+        <NavlogSection />
         <SurveyForm />
         <FenceEditor />
         {wing && (

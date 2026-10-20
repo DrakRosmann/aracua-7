@@ -1,17 +1,20 @@
-// Mapa de satélite com veículo, trilha, missão, geocerca e camada LiDAR.
+// Mapa de satélite com veículo, trilha, missão, geocerca, camada LiDAR e cartas aeronáuticas.
 
 import { useEffect, useRef } from 'react'
 import type * as GeoJSON from 'geojson'
-import { Map as MlMap, Marker, setWorkerUrl, type GeoJSONSource, type MapMouseEvent } from 'maplibre-gl'
+import { Map as MlMap, Marker, Popup, setWorkerUrl, type GeoJSONSource, type MapGeoJSONFeature, type MapMouseEvent } from 'maplibre-gl'
 import workerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url'
 import 'maplibre-gl/dist/maplibre-gl.css'
 import { station } from '../lib/store'
 import { PROTOCOL_URL, setupTiles } from '../lib/tiles'
 import { fenceIsEmpty, sameFence, type FenceData } from '../lib/fence'
-import { circle, enuToLatLon, rectangle, survey, type LatLon } from '../lib/geo'
+import { circle, destination, distance, enuToLatLon, greatCircle, rectangle, survey, type LatLon } from '../lib/geo'
 import { wpName } from '../lib/format'
 import { vehicleClass, type VehicleClass } from '../types'
 import { t as tr } from '../lib/i18n'
+import { addChartLayers, applyChartVisibility, FONT, GLYPHS, INFO_LAYERS, PICKABLE, setChartData, setupGlyphs } from './chartLayers'
+import { fmtLimit } from '../lib/charts'
+import { fmtEte, fmtNavDist } from '../lib/navlog'
 
 setWorkerUrl(workerUrl)
 
@@ -46,6 +49,58 @@ function vehicleElement() {
   return el
 }
 
+/** Linha que segue o grande círculo nas pernas longas (como o avião voa e como as cartas mostram). */
+function geodesic(coords: [number, number][]): [number, number][] {
+  const out: [number, number][] = []
+  coords.forEach(([lon, lat], i) => {
+    if (i > 0) {
+      const [plon, plat] = coords[i - 1]
+      const a = { lat: plat, lon: plon }, b = { lat, lon }
+      if (distance(a, b) > 30_000) {
+        out.push(...greatCircle(a, b, 20_000).slice(1, -1).map((p) => [p.lon, p.lat] as [number, number]))
+      }
+    }
+    out.push([lon, lat])
+  })
+  return out
+}
+
+/** Círculo de raio `r` metros em torno de c, no grande círculo. */
+function ring(c: LatLon, r: number): [number, number][] {
+  return Array.from({ length: 129 }, (_, i) => {
+    const p = destination(c, (i / 128) * 360, r)
+    return [p.lon, p.lat] as [number, number]
+  })
+}
+
+function esc(s: string) {
+  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!)
+}
+
+/** Texto do balão de um elemento das cartas. */
+function chartPopup(f: MapGeoJSONFeature): string | null {
+  const c = station.charts
+  if (!c) return null
+  const p = f.properties as Record<string, string>
+  if (f.layer.id === 'ch-apt') {
+    const a = c.airports.get(p.id)
+    return a ? `<b>${esc(a.id)}</b> ${esc(a.name)}<br><small>${a.ifr ? 'IFR' : 'VFR'} · ${a.public ? tr('público') : tr('privado')}${a.elev !== undefined ? ` · ${a.elev} m` : ''}</small>` : null
+  }
+  if (f.layer.id === 'ch-fix' || f.layer.id === 'ch-navaid') {
+    const g = f.geometry as GeoJSON.Point
+    const fx = c.fixes.get(p.id)?.find((x) => Math.abs(x.lon - g.coordinates[0]) < 1e-4 && Math.abs(x.lat - g.coordinates[1]) < 1e-4)
+    if (!fx) return null
+    const kind = { wpt: tr('fixo'), vor: 'VOR', vordme: 'VOR/DME', dme: 'DME', ndb: 'NDB' }[fx.kind] ?? fx.kind
+    const aws = [...c.graph.entries()].filter(([, g2]) => g2.has(fx.id)).map(([aw]) => aw)
+    return `<b>${esc(fx.id)}</b> ${kind}${fx.name ? ` · ${esc(fx.name)}` : ''}${fx.freq ? ` · ${esc(fx.freq)}` : ''}<br><small>${fx.lat.toFixed(4)}, ${fx.lon.toFixed(4)}${aws.length ? ` · ${esc(aws.join(' '))}` : ''}</small>`
+  }
+  if (f.layer.id === 'ch-aw-low' || f.layer.id === 'ch-aw-high') {
+    return `<b>${esc(p.aw)}</b> ${String(p.upper) === 'true' ? tr('aerovia superior') : tr('aerovia inferior')}${String(p.rnav) === 'true' ? ' RNAV' : ''}<br><small>${esc(p.lim)}${String(p.oneway) === 'true' ? ` · ${tr('mão única')}` : ''}</small>`
+  }
+  const a = c.pack.airspaces.find((x) => x.id === p.id && x.kind === p.kind)
+  return a ? `<b>${esc(a.kind)} ${esc(a.id)}</b> ${esc(a.name)}<br><small>${fmtLimit(a.hi)} / ${fmtLimit(a.lo)}</small>` : null
+}
+
 function wpElement(i: number) {
   const el = document.createElement('div')
   el.className = 'wp-marker'
@@ -60,10 +115,12 @@ export function MapView() {
     const s = station.settings
     const t0 = station.telem
     setupTiles(s.tileUrl, s.keepTiles)
+    setupGlyphs()
     const map = new MlMap({
       container: box.current!,
       style: {
         version: 8,
+        glyphs: GLYPHS,
         sources: { sat: { type: 'raster', tiles: [PROTOCOL_URL], tileSize: 256, maxzoom: 19, attribution: s.tileAttribution } },
         layers: [{ id: 'sat', type: 'raster', source: 'sat' }],
       },
@@ -103,6 +160,8 @@ export function MapView() {
     const src = (id: string) => map.getSource(id) as GeoJSONSource | undefined
 
     map.on('load', () => {
+      addChartLayers(map)
+      for (const id of ['marks', 'rings']) map.addSource(id, { type: 'geojson', data: EMPTY })
       for (const id of ['fence', 'fenceareas', 'drawing', 'trail', 'route', 'vmission', 'survey', 'voxels', 'voxels3d']) map.addSource(id, { type: 'geojson', data: EMPTY })
       map.addLayer({ id: 'voxels', type: 'circle', source: 'voxels', paint: {
         'circle-radius': ['interpolate', ['linear'], ['zoom'], 14, 0.6, 18, 2.2, 20, 5],
@@ -130,7 +189,21 @@ export function MapView() {
       map.addLayer({ id: 'trail', type: 'line', source: 'trail', paint: { 'line-color': '#2fcf5f', 'line-width': 2.5, 'line-opacity': 0.8 } })
       map.addLayer({ id: 'route', type: 'line', source: 'route', layout: { 'line-cap': 'round', 'line-join': 'round' },
         paint: { 'line-color': '#ffffff', 'line-width': 3, 'line-dasharray': [0.1, 2.2] } })
+      // Longo alcance: alcance com a energia que resta, alcance do rádio, PNR e ETP.
+      map.addLayer({ id: 'rings', type: 'line', source: 'rings', paint: {
+        'line-color': ['match', ['get', 'kind'], 'radio', '#8fb6ff', '#f5b43a'], 'line-width': 1.8, 'line-dasharray': [3, 2], 'line-opacity': 0.85,
+      } })
+      map.addLayer({ id: 'rings-label', type: 'symbol', source: 'rings', layout: {
+        'symbol-placement': 'line', 'text-field': ['get', 'label'], 'text-font': FONT, 'text-size': 11, 'symbol-spacing': 400,
+      }, paint: { 'text-color': ['match', ['get', 'kind'], 'radio', '#bcd3ff', '#ffd27a'], 'text-halo-color': 'rgba(10,14,20,0.9)', 'text-halo-width': 1.4 } })
+      map.addLayer({ id: 'marks', type: 'symbol', source: 'marks', layout: {
+        'icon-image': 'ic-mark', 'icon-size': 0.9, 'icon-allow-overlap': true, 'text-allow-overlap': true,
+        'text-field': ['get', 'label'], 'text-font': FONT, 'text-size': 11.5, 'text-offset': [0, 1.2], 'text-anchor': 'top',
+      }, paint: {
+        'icon-color': ['match', ['get', 'kind'], 'pnr', '#ef4a3c', 'toc', '#7cf29c', 'tod', '#7cf29c', '#f5b43a'], 'text-color': '#ffffff', 'text-halo-color': 'rgba(10,14,20,0.95)', 'text-halo-width': 1.6,
+      } })
       loaded = true
+      onCharts()
       onMission()
       onMap(true)
       onParams()
@@ -207,7 +280,10 @@ export function MapView() {
         const el = m.getElement()
         el.classList.toggle('sel', planning && i === station.selected)
         const drops = w.drop?.length ? `↓ ${w.drop.map((id) => station.payloadName(id)).join(', ')}` : ''
-        ;(el.querySelector('small') as HTMLElement).textContent = planning ? `${Math.round(w.alt)} m${drops ? ` · ${drops}` : ''}` : drops
+        ;(el.querySelector('b') as HTMLElement).textContent = w.name ?? wpName(i)
+        el.classList.toggle('named', !!w.name)
+        const msl = station.settings.longRange.altMsl ? ' MSL' : ''
+        ;(el.querySelector('small') as HTMLElement).textContent = planning ? `${Math.round(w.alt)} m${msl}${drops ? ` · ${drops}` : ''}` : drops
         el.classList.toggle('drop', !!drops)
         if (!el.isConnected) m.addTo(map)
       })
@@ -216,12 +292,13 @@ export function MapView() {
       const t = station.telem
       const coords = plan.map((w) => [w.lon, w.lat])
       if (planning && t?.home) coords.unshift([t.home.lon, t.home.lat])
-      src('route')?.setData(coords.length > 1 ? { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } } : EMPTY)
+      src('route')?.setData(coords.length > 1 ? { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: geodesic(coords as [number, number][]) } } : EMPTY)
       const vm = station.onVehicle
       const differs = planning && vm.length > 0 && (vm.length !== plan.length || vm.some((w, i) => w.lat !== plan[i].lat || w.lon !== plan[i].lon))
       const vcoords = vm.map((w) => [w.lon, w.lat])
       if (t?.home) vcoords.unshift([t.home.lon, t.home.lat])
-      src('vmission')?.setData(differs && vcoords.length > 1 ? { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: vcoords } } : EMPTY)
+      src('vmission')?.setData(differs && vcoords.length > 1 ? { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: geodesic(vcoords as [number, number][]) } } : EMPTY)
+      onNav()
       const sp = station.surveyPreview
       if (planning && sp) {
         const c = station.mapApi!.center()
@@ -337,6 +414,8 @@ export function MapView() {
 
     const onUi = () => {
       if (loaded) {
+        const lr = station.settings.longRange
+        applyChartVisibility(map, station.settings.chartsOn && !!station.charts, station.settings.chartLayers, lr.chartBase)
         map.setLayoutProperty('voxels', 'visibility', station.lidarLayer && !station.map3d ? 'visible' : 'none')
         map.setLayoutProperty('voxels3d', 'visibility', station.lidarLayer && station.map3d ? 'visible' : 'none')
       }
@@ -352,14 +431,71 @@ export function MapView() {
         station.emit('ui')
       }
     })
+    const near = (e: MapMouseEvent, layers: string[]) => {
+      const ids = layers.filter((id) => map.getLayer(id) && map.getLayoutProperty(id, 'visibility') !== 'none')
+      if (!ids.length) return []
+      const { x, y } = e.point
+      return map.queryRenderedFeatures([[x - 7, y - 7], [x + 7, y + 7]], { layers: ids })
+    }
+    let popup: Popup | null = null
     map.on('click', (e: MapMouseEvent) => {
-      if (station.view !== 'plan') return
+      popup?.remove()
+      popup = null
+      const adding = station.view === 'plan' && (station.drawing || station.addMode)
+      if (!adding) {
+        // Fora da edição: tocar num elemento das cartas mostra o que ele é.
+        const f = near(e, INFO_LAYERS)[0]
+        const html = f && chartPopup(f)
+        if (html) popup = new Popup({ closeButton: false, className: 'chart-pop', maxWidth: '280px' }).setLngLat(e.lngLat).setHTML(html).addTo(map)
+        return
+      }
       if (station.drawing) return station.addDrawPoint({ lat: e.lngLat.lat, lon: e.lngLat.lng })
-      if (!station.addMode) return
       const alt = station.settings.wpAlt
+      // Perto de um fixo, auxílio ou aeródromo: o waypoint vai exatamente nele, com o nome.
+      const f = near(e, PICKABLE)[0]
+      if (f) {
+        const [lon, lat] = (f.geometry as GeoJSON.Point).coordinates
+        station.setPlan([...station.plan, { lat, lon, alt, name: String(f.properties.id) }], station.plan.length)
+        return
+      }
       station.setPlan([...station.plan, { lat: e.lngLat.lat, lon: e.lngLat.lng, alt }], station.plan.length)
     })
     map.on('moveend', () => station.surveyPreview && station.view === 'plan' && onMission())
+
+    // ---- cartas aeronáuticas ----
+    let chartsId: number | null | undefined
+    const onCharts = () => {
+      if (!loaded) return
+      const id = station.charts?.id ?? null
+      if (id !== chartsId) {
+        chartsId = id
+        setChartData(map, station.charts)
+      }
+      onUi()
+    }
+
+    // ---- longo alcance: PNR, ETP, alcance da energia e do rádio ----
+    let lastNav = 0
+    const onNav = () => {
+      if (!loaded) return
+      lastNav = performance.now()
+      const lr = station.settings.longRange
+      const u = lr.units
+      const marks: GeoJSON.Feature[] = []
+      const nl = station.navlog()
+      if (nl?.pnr) marks.push({ type: 'Feature', properties: { kind: 'pnr', label: `PNR · ${fmtEte(nl.pnr.time)}` }, geometry: { type: 'Point', coordinates: [nl.pnr.pos.lon, nl.pnr.pos.lat] } })
+      if (nl?.toc) marks.push({ type: 'Feature', properties: { kind: 'toc', label: 'TOC' }, geometry: { type: 'Point', coordinates: [nl.toc.pos.lon, nl.toc.pos.lat] } })
+      if (nl?.tod) marks.push({ type: 'Feature', properties: { kind: 'tod', label: 'TOD' }, geometry: { type: 'Point', coordinates: [nl.tod.pos.lon, nl.tod.pos.lat] } })
+      if (nl?.etp) marks.push({ type: 'Feature', properties: { kind: 'etp', label: `ETP · ${fmtEte(nl.etp.time)}` }, geometry: { type: 'Point', coordinates: [nl.etp.pos.lon, nl.etp.pos.lat] } })
+      src('marks')?.setData({ type: 'FeatureCollection', features: marks })
+      const rings: GeoJSON.Feature[] = []
+      const t = station.telem
+      if (t?.home && lr.radioKm > 0) rings.push({ type: 'Feature', properties: { kind: 'radio', label: tr('rádio {d}', { d: fmtNavDist(lr.radioKm * 1000, u) }) }, geometry: { type: 'LineString', coordinates: ring(t.home, lr.radioKm * 1000) } })
+      const live = t?.connected && t.lat ? station.live() : null
+      if (live?.reach && t && station.view === 'fly') rings.push({ type: 'Feature', properties: { kind: 'reach', label: tr('alcance {d}', { d: fmtNavDist(live.reach, u) }) }, geometry: { type: 'LineString', coordinates: ring(t, live.reach) } })
+      src('rings')?.setData({ type: 'FeatureCollection', features: rings })
+    }
+    const onTelemetryNav = () => performance.now() - lastNav > 3000 && onNav()
 
     // ---- pontos de lançamento (sistema de entrega) ----
     let dropMarkers = new Map<number, Marker>()
@@ -393,6 +529,8 @@ export function MapView() {
       station.subscribe('map', () => onMap()),
       station.subscribe('params', onParams),
       station.subscribe('ui', onUi),
+      station.subscribe('charts', onCharts),
+      station.subscribe('telemetry', onTelemetryNav),
     ]
     onTelemetry()
     return () => {
@@ -400,6 +538,7 @@ export function MapView() {
       dropMarkers.forEach((m) => m.remove())
       dropMarkers = new Map()
       clearInterval(voxTimer)
+      popup?.remove()
       station.mapApi = null
       map.remove()
     }

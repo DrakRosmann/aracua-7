@@ -158,14 +158,19 @@ impl Link {
 
     /// COMMAND_INT, para os comandos que o ArduPilot só aceita nele (os GUIDED_CHANGE_* do avião).
     pub fn command_int(&self, command: MavCmd, frame: MavFrame, p: [f32; 4], z: f32) {
+        self.command_int_at(command, frame, p, (0.0, 0.0), z);
+    }
+
+    /// COMMAND_INT com posição (lat, lon em graus), como o DO_REPOSITION.
+    pub fn command_int_at(&self, command: MavCmd, frame: MavFrame, p: [f32; 4], (lat, lon): (f64, f64), z: f32) {
         let (ts, tc) = self.target();
         self.send(&MavMessage::COMMAND_INT(COMMAND_INT_DATA {
             param1: p[0],
             param2: p[1],
             param3: p[2],
             param4: p[3],
-            x: 0,
-            y: 0,
+            x: (lat * 1e7).round() as i32,
+            y: (lon * 1e7).round() as i32,
             z,
             command,
             target_system: ts,
@@ -198,8 +203,8 @@ impl Link {
             start_stop: 1,
         }));
         // Mensagens que não fazem parte dos fluxos padrão.
-        for (id, hz) in [(242.0, 0.5), (241.0, 2.0), (147.0, 1.0), (65.0, 5.0)] {
-            // HOME_POSITION, VIBRATION, BATTERY_STATUS, RC_CHANNELS
+        for (id, hz) in [(242.0, 0.5), (241.0, 2.0), (147.0, 1.0), (65.0, 5.0), (168.0, 1.0)] {
+            // HOME_POSITION, VIBRATION, BATTERY_STATUS, RC_CHANNELS, WIND
             self.command_long(MavCmd::MAV_CMD_SET_MESSAGE_INTERVAL, [id, 1e6 / hz, 0.0, 0.0, 0.0, 0.0, 0.0]);
         }
     }

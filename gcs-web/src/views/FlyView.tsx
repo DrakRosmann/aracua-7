@@ -13,6 +13,7 @@ import { AutopilotPanel } from '../components/Autopilot'
 import { CountdownOverlay, DeliveryPanel, ReleaseFlash } from '../components/Delivery'
 import { EnginePanel } from '../components/Engine'
 import { ForcePrompt, ReplayBar } from '../components/Replay'
+import { ChartsButton, NavPanel } from '../components/LongRange'
 import { vehicleClass } from '../types'
 import { t as tr } from '../lib/i18n'
 
@@ -63,6 +64,8 @@ function FlyRail() {
         <button className={`rb ${station.deliveryOpen ? 'on' : ''}`} onClick={() => { station.deliveryOpen = !station.deliveryOpen; station.emit('ui') }}><Icon.drop />{tr('Entrega')}</button>
         <button className={`rb ${station.engineOpen ? 'on' : ''}`} title={tr('Painel do motor: rotação, temperaturas, combustível, bateria e gerador')} onClick={() => { station.engineOpen = !station.engineOpen; station.emit('ui') }}><Icon.engine />{tr('Motor')}</button>
         <button className={`rb ${station.apOpen ? 'on' : ''} ${station.telem?.ap?.engaged ? 'apon' : ''}`} title={tr('Piloto automático: rumo, altitude, velocidade vertical e velocidade, como num avião')} onClick={() => { station.apOpen = !station.apOpen; station.emit('ui') }}><Icon.yoke />{tr('A/P')}</button>
+        <button className={`rb ${station.navOpen ? 'on' : ''} ${station.bingo ? 'bingo' : ''}`} title={tr('Navegação de longo alcance: próximo fixo, destino, energia para voltar, direto para e aeródromos próximos')} onClick={() => { station.navOpen = !station.navOpen; station.emit('ui') }}><Icon.route />{tr('Nav')}</button>
+        <ChartsButton top={300} />
         <button className="rb" onClick={() => station.mapApi?.zoomBy(1)}><Icon.plus />{tr('Zoom')}</button>
         <button className="rb" onClick={() => station.mapApi?.zoomBy(-1)}><Icon.minus />{tr('Zoom')}</button>
       </div>
@@ -216,6 +219,7 @@ export function FlyView() {
       <DeliveryPanel />
       <EnginePanel />
       <AutopilotPanel />
+      <NavPanel />
       <ReleaseFlash />
       <CountdownOverlay />
       <Toast />

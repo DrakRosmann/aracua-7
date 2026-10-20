@@ -15,12 +15,12 @@ sem alteração a partir do computador de bordo (`ros2_ws/`, nó `map_link`).
 | `type`            | Quando                     | Conteúdo |
 |-------------------|----------------------------|----------|
 | `hello`           | ao conectar                | `bridge`, `version`, `mavlink` (endereço), `replay` (bool), `log_file` (onde está gravando, ou `null`) |
-| `telemetry`       | 10 Hz                      | estado completo do veículo (ver `gcs-web/src/types.ts` → `Telemetry`); `vehicle_class` (`copter`, `heli`, `plane`, `vtol` ou `rover`) diz qual tabela de modos vale; `ap` é o estado do piloto automático (abaixo) |
+| `telemetry`       | 10 Hz                      | estado completo do veículo (ver `gcs-web/src/types.ts` → `Telemetry`); `vehicle_class` (`copter`, `heli`, `plane`, `vtol` ou `rover`) diz qual tabela de modos vale; `ap` é o estado do piloto automático (abaixo); `wind` (`dir` de onde sopra, graus verdadeiros; `speed` e `speed_z` em m/s) vem da mensagem WIND do ArduPilot, ou `null` |
 | `statustext`      | a cada STATUSTEXT          | `severity` (0–7), `text` |
 | `ack`             | a cada COMMAND_ACK         | `command` (ex.: `MAV_CMD_NAV_TAKEOFF`), `result` (ex.: `MAV_RESULT_ACCEPTED`) |
 | `param`           | a cada PARAM_VALUE         | `id`, `value`, `index`, `count` |
 | `mission_upload`  | fim do envio de missão     | `ok`, `result`, `count`, `wp_seq` (seq MAVLink de cada waypoint) |
-| `vehicle_mission` | ao achar o veículo, a novos clientes, depois de cada envio e de cada `mission_download` | missão como está no veículo: `items` (`{lat, lon, alt, drop?}`), `wp_seq`, `rtl_at_end`, `land_at_end`, `ignored` (itens que a estação não representa), `count` |
+| `vehicle_mission` | ao achar o veículo, a novos clientes, depois de cada envio e de cada `mission_download` | missão como está no veículo: `items` (`{lat, lon, alt, drop?}`), `wp_seq`, `rtl_at_end`, `land_at_end`, `loiter_at_end`, `alt_msl`, `ignored` (itens que a estação não representa), `count` |
 | `replay`          | 2 Hz durante a reprodução e a cada comando `replay` | `file`, `t` e `duration` (s), `speed`, `paused` |
 | `calib`           | durante calibrações        | `kind: "accel"` com `status` (`position`, `success`, `failed`) e `position` (1–6); `kind: "compass"` com `compass`, `pct`, `attempt`, `status`; `kind: "compass_report"` com `compass`, `fitness`, `autosaved`, `status` |
 | `vehicle_fence`   | ao ler a geocerca do veículo (depois da missão, ao conectar) e depois de cada envio | `inclusion` e `exclusion` (listas de polígonos `[{lat, lon}]`), `circles_inclusion` e `circles_exclusion` (`{lat, lon, radius}`) |
@@ -31,6 +31,9 @@ sem alteração a partir do computador de bordo (`ros2_ws/`, nó `map_link`).
 | `payload`         | ao conectar, 2 Hz, 10 Hz durante a contagem e a cada mudança | estado do sistema de entrega (ver `PayloadState` em `types.ts`) |
 | `payload_release` | a cada lançamento          | `event`: `n` (número no contador), `slot`, `name`, `t`, `lat`, `lon`, `alt_rel`, `groundspeed`, `mass_g`, `source` (`estação`, `missão` ou `externo`), `confirmed` |
 | `payload_confirm` | chave confirmou ou o prazo venceu | `event` com `confirmed: true/false` |
+| `charts_info`     | ao conectar e a cada mudança nas cartas | `loaded`, `id` (= `fetched`), `source`, `fetched` (ms), `effective` e `next` (emenda em vigor e a próxima, AAAA-MM-DD), `counts` (`fixes`, `airports`, `airways`, `airspaces`), `bytes`, `busy` (baixando), `error` |
+| `charts_status`   | durante `charts_fetch`     | `step` (camada sendo baixada), `done`, `total` |
+| `charts`          | só para quem mandou `charts_get` | as cartas inteiras (formato abaixo), com `type: "charts"` |
 
 ## Interface → ponte (JSON, campo `cmd`)
 
@@ -39,7 +42,13 @@ sem alteração a partir do computador de bordo (`ros2_ws/`, nó `map_link`).
 | `arm`             | `arm: bool`, `force?: bool` | `MAV_CMD_COMPONENT_ARM_DISARM` |
 | `mode`            | `mode`: nome do modo no firmware do veículo (ex.: `LOITER`, `FBWA`, `QHOVER`) | `MAV_CMD_DO_SET_MODE` com o número do modo na tabela da classe |
 | `takeoff`         | `alt` (m, relativa), `force?: bool` | pré-voo da ponte (pulado com `force`); multirrotor/helicóptero: GUIDED → arma → `MAV_CMD_NAV_TAKEOFF`; avião/VTOL: `TKOFF_ALT` = alt → modo TAKEOFF → arma |
-| `mission_upload`  | `items: [{lat, lon, alt, drop?}]`, `rtl_at_end?`, `land_at_end?` (asa fixa), `approach_deg?` (rumo final do pouso), `cruise_ms?` (velocidade para o ponto de soltura) | protocolo de missão completo (COUNT → REQUEST_INT → ITEM_INT → ACK) |
+| `mission_upload`  | `items: [{lat, lon, alt, drop?}]`, `rtl_at_end?`, `land_at_end?` (asa fixa), `approach_deg?` (rumo final do pouso), `cruise_ms?` (velocidade para o ponto de soltura), `alt_msl?` (altitudes acima do nível do mar), `loiter_at_end?` (circular sobre o último ponto) | protocolo de missão completo (COUNT → REQUEST_INT → ITEM_INT → ACK) |
+| `mission_current` | `seq` (item da missão no veículo) | `MISSION_SET_CURRENT` ("direto para"); no ar e fora de AUTO, entra em AUTO |
+| `goto`            | `lat`, `lon`, `alt?` (m sobre o home; sem ela, a altura atual) | `COMMAND_INT` `MAV_CMD_DO_REPOSITION` (param2 = 1: entra em GUIDED); só no ar. Usado no desvio para um aeródromo |
+| `charts_fetch`    | `url?` (WFS; padrão `--charts-url`) | baixa as cartas do DECEA, grava em `--charts-file` e manda `charts_info` |
+| `charts_get`      | — | responde `charts` só a este cliente |
+| `charts_import`   | `pack` (formato abaixo) | confere, grava e manda `charts_info` |
+| `charts_clear`    | — | apaga as cartas guardadas |
 | `mission_download`| — | MISSION_REQUEST_LIST → COUNT → REQUEST_INT… → ACK; responde com `vehicle_mission` |
 | `mission_start`   | `force?: bool` | pré-voo da ponte se estiver no chão; modo AUTO + `MAV_CMD_MISSION_START` |
 | `replay`          | `speed?` (0.1–64), `paused?`, `seek?` (s) | só na reprodução |
@@ -163,9 +172,14 @@ A ponte monta a missão no formato que o firmware espera:
 | 2…  | `NAV_WAYPOINT` para cada item da interface |
 |     | multirrotor com `drop: [id]`: um `DO_SET_SERVO`/`DO_SET_RELAY` por compartimento, `NAV_LOITER_TIME` de `mission_hold_s` no mesmo ponto e os comandos de travar de novo |
 |     | asa fixa com `drop`: `NAV_WAYPOINT` de soltura `v·√(2h/g)·0,85` antes do alvo (raio de aceitação 2 m), os comandos de soltar, o waypoint do alvo e os de travar de novo |
-| fim | multirrotor: `NAV_RETURN_TO_LAUNCH` (se `rtl_at_end`) |
+| fim | com `loiter_at_end` (e sem `land_at_end`): `NAV_LOITER_UNLIM` sobre o último waypoint (voo só de ida) |
+|     | multirrotor: `NAV_RETURN_TO_LAUNCH` (se `rtl_at_end`) |
 |     | avião com `land_at_end`: `DO_LAND_START`, aproximação a 500 m/40 m e 250 m/20 m antes do home no rumo `approach_deg` (ou vindo do último waypoint), `NAV_LAND` no home |
 |     | VTOL com `land_at_end`: `NAV_VTOL_LAND` no home |
+
+Com `alt_msl`, os waypoints vão no frame `GLOBAL_INT` (altitude acima do nível do mar) e a decolagem
+continua relativa ao home, até a altura do primeiro ponto sobre o home (entre 15 e 150 m); o resto da
+subida acontece na rota. Sem ele, tudo é `GLOBAL_RELATIVE_ALT_INT`.
 
 Ao ler do veículo (`vehicle_mission`), a ponte faz o caminho inverso: reconhece os pontos de soltura
 e de aproximação que ela mesma gera e devolve só os waypoints da interface, com os `drop` ligados de
@@ -173,6 +187,39 @@ volta aos compartimentos pelo canal do servo ou pelo relé.
 
 Como a entrega acrescenta itens, a resposta `mission_upload` traz `wp_seq`, o `seq` de cada waypoint;
 a interface usa essa lista para saber qual waypoint está ativo a partir de `mission_current`.
+
+### Cartas aeronáuticas
+
+A ponte baixa as cartas do GeoServer público do DECEA (`--charts-url`, padrão
+`https://geoaisweb.decea.mil.br/geoserver/ows`, camadas `ICA:vw_aerovia_baixa_v2`, `ICA:vw_aerovia_alta_v2`,
+`ICA:waypoint`, `ICA:vor`, `ICA:dme`, `ICA:ndb`, `ICA:airport` e `ICA:airspace` em GeoJSON pelo WFS) e as
+guarda normalizadas em `--charts-file` (padrão `cartas.json`). O GeoServer não libera CORS, por isso o
+download é na ponte e não no navegador. Qualquer fonte pode ser convertida para o mesmo formato e importada
+(`charts_import`):
+
+```json
+{
+  "format": "aracua-charts", "version": 1, "source": "DECEA (AISWEB)", "fetched": 1792506812181,
+  "effective": "2026-10-01", "next": "2026-10-29",
+  "fixes":     [{ "id": "BRV", "kind": "vordme", "lat": -22.5, "lon": -46.0, "name": "VOR EXEMPLO", "freq": "113.10", "var": -21.0 }],
+  "airports":  [{ "id": "SBSP", "name": "Congonhas", "lat": -23.6261, "lon": -46.6564, "elev": 802, "ifr": true, "public": true }],
+  "airways":   [{ "airway": "Z21", "upper": false, "rnav": true, "from": "USVEL", "to": "TIDNI", "seq": 70, "dir": "fwd",
+                  "lo": { "v": 145, "u": "FL", "r": "STD" }, "hi": { "v": 245, "u": "FL", "r": "STD" },
+                  "coords": [[-48.9, -25.4], [-48.7, -25.3]] }],
+  "airspaces": [{ "id": "SBR881", "kind": "R", "name": "PARAMOTOR", "lo": { "v": 0, "u": "FT", "r": "SFC" },
+                  "hi": { "v": 500, "u": "FT", "r": "MSL" }, "ring": [[-35.0, -9.0], [-35.1, -9.0], [-35.1, -9.1], [-35.0, -9.0]] }]
+}
+```
+
+* `fixes.kind`: `wpt`, `vor`, `vordme`, `dme` ou `ndb`; `var` é a declinação magnética (leste positiva).
+* `airways`: um trecho por par de fixos; `dir` é `both`, `fwd` (só de `from` para `to`) ou `back`; `coords` vai
+  de `from` a `to` em `[lon, lat]`; `mea` (opcional) é a altitude mínima em rota.
+* Limites verticais: `v` (valor), `u` (`FT`, `FL` ou `M`) e `r` (`SFC`, `MSL` ou `STD`); FL999 é ilimitado.
+* `airspaces.kind`: `FIR`, `UIR`, `CTA`, `UTA`, `TMA`, `CTR`, `ATZ`, `R`, `P`, `D`, `AMA` (altitude mínima de área,
+  em `lo`) ou `ADIZ`; `ring` é o contorno externo fechado.
+
+Coordenadas fora da faixa, trechos com menos de dois pontos ou contornos com menos de quatro fazem a ponte
+recusar o arquivo (`error` "cartas: …").
 
 ## Quadros binários do mapa (little-endian)
 

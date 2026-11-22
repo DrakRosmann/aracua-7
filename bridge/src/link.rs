@@ -280,6 +280,8 @@ impl ReplayCtl {
 /// Lê um .tlog inteiro para a memória e entrega as mensagens no ritmo original.
 pub struct ReplayReader {
     data: Vec<u8>,
+    /// (instante, início e fim do quadro) de cada registro com CRC válido.
+    recs: Vec<(u64, (usize, usize))>,
     pos: usize,
     pub first_us: u64,
     pub last_us: u64,
@@ -289,44 +291,31 @@ pub struct ReplayReader {
     fast_until: u64,
 }
 
-/// Tamanho do quadro MAVLink que começa em `b[0]`, ou None se não for um quadro.
-pub fn frame_len(b: &[u8]) -> Option<usize> {
-    match *b.first()? {
-        0xFD if b.len() >= 3 => Some(12 + b[1] as usize + if b[2] & 1 != 0 { 13 } else { 0 }),
-        0xFE if b.len() >= 2 => Some(8 + b[1] as usize),
-        _ => None,
-    }
-}
-
 impl ReplayReader {
     pub fn open(path: &Path) -> anyhow::Result<Self> {
         let data = std::fs::read(path)?;
-        let mut r = Self { data, pos: 0, first_us: 0, last_us: 0, anchor: None, fast_until: 0 };
-        let (mut first, mut last) = (None, 0);
-        while let Some((ts, _)) = r.next_raw() {
-            first.get_or_insert(ts);
-            last = ts;
+        let mut log = mavlink_tlog::TlogSlice::new(&data);
+        let mut recs = Vec::new();
+        while let Some(rec) = log.next() {
+            let end = log.position();
+            recs.push((rec.timestamp_us, (end - rec.frame.len(), end)));
         }
-        r.first_us = first.ok_or_else(|| anyhow::anyhow!("nenhuma mensagem MAVLink em {}", path.display()))?;
-        r.last_us = last;
-        r.pos = 0;
-        Ok(r)
+        let skipped = log.stats().skipped_bytes;
+        if skipped > 0 {
+            tracing::warn!("{}: {skipped} bytes danificados ignorados", path.display());
+        }
+        let (first, last) = match (recs.first(), recs.last()) {
+            (Some(f), Some(l)) => (f.0, l.0),
+            _ => anyhow::bail!("nenhuma mensagem MAVLink em {}", path.display()),
+        };
+        Ok(Self { data, recs, pos: 0, first_us: first, last_us: last, anchor: None, fast_until: 0 })
     }
 
-    /// Próximo registro (instante, início e fim do quadro), sem decodificar; pula lixo.
+    /// Próximo registro (instante, início e fim do quadro), sem decodificar.
     fn next_raw(&mut self) -> Option<(u64, (usize, usize))> {
-        while self.pos + 8 < self.data.len() {
-            let ts = u64::from_be_bytes(self.data[self.pos..self.pos + 8].try_into().unwrap());
-            let start = self.pos + 8;
-            match frame_len(&self.data[start..]) {
-                Some(n) if start + n <= self.data.len() => {
-                    self.pos = start + n;
-                    return Some((ts, (start, start + n)));
-                }
-                _ => self.pos += 1, // fora de sincronia: procura o próximo registro
-            }
-        }
-        None
+        let r = *self.recs.get(self.pos)?;
+        self.pos += 1;
+        Some(r)
     }
 
     fn next(&mut self, ctl: &ReplayCtl) -> RecvResult {
@@ -417,10 +406,40 @@ mod tests {
     }
 
     #[test]
-    fn tamanho_de_quadro() {
-        assert_eq!(frame_len(&[0xFD, 9, 0]), Some(21));
-        assert_eq!(frame_len(&[0xFD, 9, 1]), Some(34));
-        assert_eq!(frame_len(&[0xFE, 9]), Some(17));
-        assert_eq!(frame_len(&[0x00]), None);
+    fn tlog_danificado_nao_inventa_registro() {
+        let dir = std::env::temp_dir().join(format!("aracua-tlog-dano-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.tlog");
+        let mut buf = Vec::new();
+        for i in 0..5u64 {
+            buf.extend_from_slice(&(1_000_000 + i * 100_000).to_be_bytes());
+            let hb = MavMessage::HEARTBEAT(HEARTBEAT_DATA { custom_mode: i as u32, ..Default::default() });
+            mavlink::write_v2_msg(&mut buf, MavHeader { system_id: 1, component_id: 1, sequence: i as u8 }, &hb).unwrap();
+            if i == 2 {
+                // Bytes danificados no meio: carimbo absurdo seguido de um falso 0xFD.
+                buf.extend_from_slice(&[0xFF; 8]);
+                buf.extend_from_slice(&[0xFD, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            }
+        }
+        std::fs::write(&path, &buf).unwrap();
+
+        let link = std::sync::Arc::new(Link::replay(&path, 64.0).unwrap());
+        let ctl = link.replay.as_ref().unwrap();
+        assert_eq!(ctl.first_us, 1_000_000);
+        assert!((ctl.duration_s() - 0.4).abs() < 1e-9);
+        // O registro falso não pode travar o ritmo da reprodução.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let l = link.clone();
+        std::thread::spawn(move || {
+            for _ in 0..5 {
+                if let Ok((_, MavMessage::HEARTBEAT(h))) = l.recv() {
+                    let _ = tx.send(h.custom_mode);
+                }
+            }
+        });
+        for i in 0..5u32 {
+            assert_eq!(rx.recv_timeout(Duration::from_secs(5)), Ok(i), "reprodução travou no registro danificado");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
